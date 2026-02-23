@@ -1,0 +1,16 @@
+node_modules
+.git
+.gitignore
+.env
+.env.*
+*.md
+tests
+scripts
+ops
+.github
+.claude
+.swarm
+dist
+coverage
+.vscode
+*.log

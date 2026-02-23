@@ -1,0 +1,104 @@
+name: ci-cd
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Least-privilege default — override per job as needed
+permissions:
+  contents: read
+
+jobs:
+  # ──────────────────────────────────────────────
+  # Quality gates (runs on every PR and push)
+  # ──────────────────────────────────────────────
+  test_and_build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Build container image
+        run: docker build -t myapp:${{ github.sha }} .
+
+  # ──────────────────────────────────────────────
+  # Staging deploy (main branch only, after tests)
+  # ──────────────────────────────────────────────
+  deploy_staging:
+    if: github.ref == 'refs/heads/main'
+    needs: [test_and_build]
+    runs-on: ubuntu-latest
+    environment: staging                   # GitHub environment with optional rules
+    permissions:
+      contents: read
+      id-token: write                      # OIDC for cloud auth — no static keys
+    steps:
+      - uses: actions/checkout@v4
+
+      # TODO: Replace with your cloud provider's OIDC action
+      # e.g., aws-actions/configure-aws-credentials or google-github-actions/auth
+      - name: Authenticate to cloud (OIDC)
+        run: echo "::notice::Configure OIDC auth for your cloud provider here"
+
+      - name: Push container image
+        run: echo "::notice::Push myapp:${{ github.sha }} to your registry here"
+
+      - name: Deploy to staging
+        run: |
+          # Replace image tag in manifests and apply
+          sed -i "s|REPLACE_WITH_SHA|${{ github.sha }}|g" ops/k8s/staging/deployment.yaml
+          kubectl apply -f ops/k8s/staging/
+
+      - name: Wait for rollout
+        run: kubectl rollout status deployment/myapp -n staging --timeout=120s
+
+      - name: Smoke test
+        run: |
+          # Verify health endpoint
+          curl -f --retry 5 --retry-delay 3 https://staging.example.com/healthz
+
+  # ──────────────────────────────────────────────
+  # Production deploy (after staging, manual approval)
+  # ──────────────────────────────────────────────
+  deploy_prod:
+    if: github.ref == 'refs/heads/main'
+    needs: [deploy_staging]
+    runs-on: ubuntu-latest
+    environment: production                # Require manual approval via GitHub env protection rules
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to cloud (OIDC)
+        run: echo "::notice::Configure OIDC auth here"
+
+      - name: Deploy to production
+        run: |
+          sed -i "s|REPLACE_WITH_SHA|${{ github.sha }}|g" ops/k8s/prod/deployment.yaml
+          kubectl apply -f ops/k8s/prod/
+
+      - name: Wait for rollout
+        run: kubectl rollout status deployment/myapp -n prod --timeout=180s
+
+      - name: Verify health
+        run: curl -f --retry 5 --retry-delay 5 https://api.example.com/healthz

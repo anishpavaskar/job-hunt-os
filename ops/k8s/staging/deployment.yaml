@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp
+  namespace: staging
+  labels:
+    app: myapp
+    env: staging
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0         # Zero-downtime: new pod must be ready before old dies
+  selector:
+    matchLabels:
+      app: myapp
+  template:
+    metadata:
+      labels:
+        app: myapp
+        env: staging
+    spec:
+      automountServiceAccountToken: false   # Security: no k8s API access unless needed
+      containers:
+        - name: myapp
+          image: registry.example.com/myapp:REPLACE_WITH_SHA
+          ports:
+            - containerPort: 3000
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 3000
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 3000
+            failureThreshold: 30
+            periodSeconds: 2    # Gives up to 60s for slow starts
+          env:
+            - name: NODE_ENV
+              value: staging
+            # Add config vars here — NEVER secrets as plain values
+            # Use k8s Secrets or external secret stores for sensitive data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: myapp
+  namespace: staging
+spec:
+  selector:
+    app: myapp
+  ports:
+    - port: 80
+      targetPort: 3000
+  type: ClusterIP
