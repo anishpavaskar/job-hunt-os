@@ -88,8 +88,9 @@ export const SCORING_WEIGHTS = {
 } as const;
 
 export const TODAY_RANKING = {
-  applyMinRoleFit: 10,
-  applyMinStackFit: 12,
+  applyMinRoleFit: 8,
+  applyMinStackFit: 8,
+  applyMinCombinedFit: 22,
   strongRoleFit: 14,
   strongStackFit: 16,
   applyBaseScore: 10,

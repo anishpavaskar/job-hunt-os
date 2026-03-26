@@ -1,33 +1,31 @@
 import { Command } from "commander";
 import { initDb } from "../db";
 import { assembleBriefingData } from "./briefing";
-import { getLatestBriefingDoc } from "../integrations/google-docs";
-import { createBriefingNotificationDraft } from "../integrations/gmail";
+import { sendBriefingHtmlEmail } from "../integrations/gmail";
 
 export async function runNotifyCommand(): Promise<string> {
-  const latestDoc = getLatestBriefingDoc();
-  if (!latestDoc) {
-    return "No previous briefing doc found. Run `npm run briefing` first.";
-  }
-
   const db = initDb();
-  const briefingData = assembleBriefingData(db, latestDoc.date);
+  const latestScan = db
+    .prepare(`SELECT completed_at FROM scans WHERE completed_at IS NOT NULL ORDER BY completed_at DESC LIMIT 1`)
+    .get() as { completed_at: string } | undefined;
+  const date = latestScan?.completed_at?.slice(0, 10) ?? new Date().toISOString().slice(0, 10);
+  const briefingData = assembleBriefingData(db, date);
 
   try {
-    const draftId = await createBriefingNotificationDraft(briefingData, latestDoc.url);
-    return `Gmail draft created for briefing ${latestDoc.date} (${draftId}).`;
+    const messageId = await sendBriefingHtmlEmail(briefingData);
+    return `Gmail briefing sent for ${briefingData.date} (${messageId}).`;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    if (message.includes("NOTIFY_EMAIL_TO")) {
-      return "Gmail notification skipped: NOTIFY_EMAIL_TO not configured";
+    if (message.includes("MY_EMAIL") || message.includes("NOTIFY_EMAIL_TO")) {
+      return "Gmail notification skipped: MY_EMAIL (or NOTIFY_EMAIL_TO) not configured";
     }
-    return `Gmail draft failed: ${message}`;
+    return `Gmail briefing failed: ${message}`;
   }
 }
 
 export function registerNotifyCommand(): Command {
   return new Command("notify")
-    .description("Create a Gmail draft for the most recent briefing without re-running the scan")
+    .description("Send the latest HTML briefing email again without re-running the scan")
     .action(async () => {
       console.log(await runNotifyCommand());
     });

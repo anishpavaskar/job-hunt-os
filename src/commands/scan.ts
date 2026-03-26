@@ -110,6 +110,14 @@ function extractSlugFromExternalKey(externalKey: string): string {
   return parts.length >= 3 ? parts[1] : parts[0];
 }
 
+function humanizeSlug(slug: string): string {
+  return slug
+    .split(/[-_]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
 async function collectYcOpportunities(
   fetchCompanies: () => Promise<FetchCompaniesResult>,
 ): Promise<{ rawCount: number; validCount: number; opportunities: ProviderOpportunity[]; roleCount: number }> {
@@ -169,7 +177,7 @@ async function collectExternalOpportunities(
 ): Promise<{ rawCount: number; validCount: number; opportunities: ProviderOpportunity[]; roleCount: number }> {
   const opportunities = items.map((opportunity) => {
     const slug = extractSlugFromExternalKey(opportunity.externalKey);
-    const companyName = namesBySlug.get(slug) ?? slug;
+    const companyName = namesBySlug.get(slug) ?? humanizeSlug(slug);
     return {
       provider,
       sourceExternalId: slug,

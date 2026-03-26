@@ -5,12 +5,14 @@ export interface GreenhouseCompany {
 
 export const GREENHOUSE_COMPANIES: GreenhouseCompany[] = [
   { slug: "anthropic", name: "Anthropic" },
-  { slug: "anduril", name: "Anduril" },
+  { slug: "andurilindustries", name: "Anduril" },
   { slug: "brex", name: "Brex" },
+  { slug: "cloudflare", name: "Cloudflare" },
+  { slug: "coinbase", name: "Coinbase" },
+  { slug: "databricks", name: "Databricks" },
+  { slug: "datadog", name: "Datadog" },
   { slug: "figma", name: "Figma" },
-  { slug: "notion", name: "Notion" },
-  { slug: "ramp", name: "Ramp" },
-  { slug: "scale", name: "Scale" },
+  { slug: "scaleai", name: "Scale AI" },
   { slug: "stripe", name: "Stripe" },
   { slug: "vercel", name: "Vercel" },
 ];

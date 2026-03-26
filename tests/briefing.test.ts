@@ -239,6 +239,7 @@ describe("briefing data assembly", () => {
     const data = assembleBriefingData(db, "2026-03-26");
 
     expect(data.date).toBe("2026-03-26");
+    expect(Array.isArray(data.applyNow)).toBe(true);
     expect(data.newRoles.length).toBeGreaterThanOrEqual(1);
     expect(Array.isArray(data.followups)).toBe(true);
     expect(Array.isArray(data.drafts)).toBe(true);
@@ -269,6 +270,103 @@ describe("briefing data assembly", () => {
     expect(includeFallbackData.newRoles.map((role) => role.company)).toEqual(["FallbackCo", "RealRoleCo"]);
   });
 
+  test("assembleNewRoles caps repeated companies and inserts a summary row for overflow", () => {
+    const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
+    const sourceId = upsertJobSource(db, { provider: "test", externalId: "repeats", url: "https://test.com" });
+    const scanId = createScan(db, "test", new Date().toISOString());
+
+    seedJob(db, sourceId, scanId, { externalKey: "t:r1", companyName: "RepeatCo", title: "Role 1", score: 91 });
+    seedJob(db, sourceId, scanId, { externalKey: "t:r2", companyName: "RepeatCo", title: "Role 2", score: 88 });
+    seedJob(db, sourceId, scanId, { externalKey: "t:r3", companyName: "RepeatCo", title: "Role 3", score: 84 });
+    seedJob(db, sourceId, scanId, { externalKey: "t:r4", companyName: "OtherCo", title: "Role 4", score: 80 });
+    db.prepare(`UPDATE jobs SET created_at = ?, updated_at = ?`).run("2026-03-26 10:00:00", "2026-03-26 10:00:00");
+
+    const roles = assembleNewRoles(db, new Set(), "2026-03-26");
+
+    expect(roles.map((role) => role.company)).toEqual(["RepeatCo", "RepeatCo", "RepeatCo", "OtherCo"]);
+    expect(roles[2].kind).toBe("overflow");
+    expect(roles[2].role).toContain("+1 more roles at RepeatCo");
+    expect(roles[2].rank).toBeNull();
+  });
+
+  test("assembleBriefingData builds a deduped apply-now section", () => {
+    const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
+    const sourceId = upsertJobSource(db, { provider: "test", externalId: "apply-now", url: "https://test.com" });
+    const scanId = createScan(db, "test", new Date().toISOString());
+
+    seedJob(db, sourceId, scanId, { externalKey: "t:a1", companyName: "ApplyCo", title: "Platform Engineer", score: 90, locations: "Remote" });
+    seedJob(db, sourceId, scanId, { externalKey: "t:a2", companyName: "ApplyCo", title: "Backend Engineer", score: 88, locations: "Remote" });
+    seedJob(db, sourceId, scanId, { externalKey: "t:a3", companyName: "OtherApplyCo", title: "SRE", score: 84, locations: "San Francisco, CA | Seattle, WA" });
+    db.prepare(`UPDATE jobs SET created_at = ?, updated_at = ?`).run("2026-03-26 10:00:00", "2026-03-26 10:00:00");
+
+    const data = assembleBriefingData(db, "2026-03-26");
+
+    expect(data.applyNow.length).toBeGreaterThanOrEqual(2);
+    expect(data.applyNow[0].company).toBe("ApplyCo");
+    expect(data.applyNow.some((role) => role.company === "OtherApplyCo")).toBe(true);
+    expect(data.applyNow.filter((role) => role.company === "ApplyCo")).toHaveLength(1);
+    expect(data.applyNow.find((role) => role.company === "OtherApplyCo")?.location).toBe("San Francisco, CA • Seattle, WA");
+  });
+
+  test("assembleBriefingData keeps strong apply-now roles even when they were discovered before the briefing date", () => {
+    const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
+    const sourceId = upsertJobSource(db, { provider: "test", externalId: "apply-queue", url: "https://test.com" });
+    const scanId = createScan(db, "test", new Date().toISOString());
+
+    const oldStrongJobId = seedJob(db, sourceId, scanId, {
+      externalKey: "t:queued-old",
+      companyName: "QueuedCo",
+      title: "Platform Engineer",
+      score: 72,
+      locations: "Remote",
+      explanationBullets: ["Strong role fit for Platform Engineer", "Stack aligns well with your core skills"],
+    });
+    db.prepare(
+      `UPDATE jobs
+       SET created_at = ?, updated_at = ?, score_breakdown_json = ?
+       WHERE id = ?`,
+    ).run(
+      "2026-03-20 10:00:00",
+      "2026-03-20 10:00:00",
+      JSON.stringify({ roleFit: 18, stackFit: 20, seniorityFit: 10, freshness: 4, companySignal: 10 }),
+      oldStrongJobId,
+    );
+
+    const data = assembleBriefingData(db, "2026-03-26");
+
+    expect(data.newRoles).toHaveLength(0);
+    expect(data.applyNow.some((role) => role.company === "QueuedCo")).toBe(true);
+  });
+
+  test("assembleBriefingData falls back to technically decent roles when strict apply-now queue is empty", () => {
+    const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
+    const sourceId = upsertJobSource(db, { provider: "test", externalId: "apply-fallback", url: "https://test.com" });
+    const scanId = createScan(db, "test", new Date().toISOString());
+
+    const fallbackJobId = seedJob(db, sourceId, scanId, {
+      externalKey: "t:apply-fallback",
+      companyName: "FallbackApplyCo",
+      title: "Software Engineer",
+      score: 56,
+      locations: "Remote",
+      explanationBullets: ["Good overlap with backend engineering work"],
+    });
+    db.prepare(
+      `UPDATE jobs
+       SET created_at = ?, updated_at = ?, score_breakdown_json = ?
+       WHERE id = ?`,
+    ).run(
+      "2026-03-26 10:00:00",
+      "2026-03-26 10:00:00",
+      JSON.stringify({ roleFit: 7, stackFit: 11, seniorityFit: 9, freshness: 5, companySignal: 10 }),
+      fallbackJobId,
+    );
+
+    const data = assembleBriefingData(db, "2026-03-26");
+
+    expect(data.applyNow.some((role) => role.company === "FallbackApplyCo")).toBe(true);
+  });
+
   test("assembleBriefingData uses the requested date window for new roles", () => {
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
     const sourceId = upsertJobSource(db, { provider: "test", externalId: "s1", url: "https://test.com" });
@@ -289,9 +387,24 @@ describe("briefing data assembly", () => {
     expect(currentDay.newRoles[0].company).toBe("NewCo");
   });
 
+  test("assembleNewRoles matches rows stored with SQLite datetime format", () => {
+    const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
+    const sourceId = upsertJobSource(db, { provider: "test", externalId: "sqlite-dt", url: "https://test.com" });
+    const scanId = createScan(db, "test", new Date().toISOString());
+
+    seedJob(db, sourceId, scanId, { externalKey: "t:sqlite-dt", companyName: "SqliteTimeCo", score: 77 });
+    db.prepare(`UPDATE jobs SET created_at = ?, updated_at = ?`).run("2026-03-26 08:56:32", "2026-03-26 08:56:32");
+
+    const roles = assembleNewRoles(db, new Set(), "2026-03-26");
+
+    expect(roles).toHaveLength(1);
+    expect(roles[0].company).toBe("SqliteTimeCo");
+  });
+
   test("getBriefingSmsSummary returns new role count and top score", () => {
     const summary = getBriefingSmsSummary({
       date: "2026-03-26",
+      applyNow: [],
       newRoles: [
         {
           rank: 1,
@@ -303,11 +416,40 @@ describe("briefing data assembly", () => {
           topRisk: null,
           applyLink: "https://example.com",
           isProspect: true,
+          remoteFlag: false,
+          extractedSkills: [],
+          stackMatch: 0,
+          applicationStatus: null,
+        },
+        {
+          kind: "overflow" as const,
+          rank: null,
+          score: null,
+          company: "Anthropic",
+          role: "+2 more roles at Anthropic",
+          location: "",
+          whyItFits: "Similar roles hidden to keep the briefing readable",
+          topRisk: null,
+          applyLink: null,
+          isProspect: true,
+          remoteFlag: false,
+          extractedSkills: [],
+          stackMatch: 0,
+          applicationStatus: null,
         },
       ],
       followups: [],
       drafts: [],
       funnel: null,
+      appliedCount: 0,
+      workflowCounts: {
+        saved: 0,
+        drafted: 0,
+        applied: 0,
+        interview: 0,
+      },
+      totalTracked: 0,
+      sourcesScanned: 0,
     });
 
     expect(summary).toEqual({ newRoleCount: 1, topScore: 92 });

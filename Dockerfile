@@ -13,8 +13,20 @@ RUN npm run build
 # ── Production stage ─────────────────────────
 FROM node:20-alpine AS production
 
+ARG LITESTREAM_VERSION=0.5.2
+
+# Install litestream and native build deps required by better-sqlite3 on Alpine
+RUN apk add --no-cache \
+    wget \
+    ca-certificates \
+    tar \
+    python3 \
+    make \
+    g++ \
+    libstdc++
+
 # Install litestream for SQLite replication
-RUN wget -qO- https://github.com/benbjohnson/litestream/releases/latest/download/litestream-v0.3.13-linux-amd64-static.tar.gz \
+RUN wget -qO- "https://github.com/benbjohnson/litestream/releases/download/v${LITESTREAM_VERSION}/litestream-${LITESTREAM_VERSION}-linux-x86_64.tar.gz" \
     | tar xz -C /usr/local/bin
 
 # Security: run as non-root
@@ -23,7 +35,7 @@ RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm ci --omit=dev --ignore-scripts
+RUN npm ci --omit=dev
 
 COPY --from=build /app/dist ./dist
 COPY config/ ./config/
@@ -40,5 +52,5 @@ RUN mkdir -p /app/data && chown -R appuser:appgroup /app
 USER appuser
 
 # No HTTP port — this is a cron worker
-# Default: run the daily briefing pipeline
-CMD ["node", "dist/src/cli.js", "briefing"]
+# Default: restore/replicate SQLite and run the daily pipeline
+CMD ["scripts/start-with-litestream.sh"]

@@ -2,11 +2,17 @@ jest.mock("googleapis", () => {
   const setCredentials = jest.fn();
   const OAuth2 = jest.fn(() => ({ setCredentials }));
   const draftsCreate = jest.fn();
+  const messagesSend = jest.fn();
+  const getProfile = jest.fn();
   const gmail = jest.fn(() => ({
     users: {
       drafts: {
         create: draftsCreate,
       },
+      messages: {
+        send: messagesSend,
+      },
+      getProfile,
     },
   }));
 
@@ -20,6 +26,8 @@ jest.mock("googleapis", () => {
       setCredentials,
       gmail,
       draftsCreate,
+      messagesSend,
+      getProfile,
     },
   };
 });
@@ -28,10 +36,9 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import {
-  buildBriefingNotificationBody,
-  buildBriefingNotificationSubject,
-  createBriefingNotificationDraft,
+  buildBriefingEmailSubject,
   createGmailDraft,
+  sendBriefingHtmlEmail,
 } from "../src/integrations/gmail";
 import { runNotifyCommand } from "../src/commands/notify";
 import { runDraftCommand } from "../src/commands/draft";
@@ -45,6 +52,8 @@ const googleapisMock = jest.requireMock("googleapis") as {
     setCredentials: jest.Mock;
     gmail: jest.Mock;
     draftsCreate: jest.Mock;
+    messagesSend: jest.Mock;
+    getProfile: jest.Mock;
   };
 };
 
@@ -67,6 +76,7 @@ describe("Gmail draft integration", () => {
       GOOGLE_CLIENT_SECRET: "client-secret",
       GOOGLE_REFRESH_TOKEN: "refresh-token",
       NOTIFY_EMAIL_TO: "anish@example.com",
+      MY_EMAIL: "foo@example.com",
       ANTHROPIC_API_KEY: "anthropic-key",
     };
 
@@ -131,7 +141,7 @@ describe("Gmail draft integration", () => {
     const call = googleapisMock.__mock.draftsCreate.mock.calls[0][0];
     const decoded = decodeRaw(call.requestBody.message.raw);
     expect(decoded).toContain("To: ");
-    expect(decoded).toContain("Subject: Re: Software Engineer — Anthropic");
+    expect(decoded).toContain("Subject: =?UTF-8?B?");
     expect(decoded).toContain("Hi Anthropic team");
   });
 
@@ -164,11 +174,41 @@ describe("Gmail draft integration", () => {
     expect(detail).toContain("Anthropic");
   });
 
-  test("createBriefingNotificationDraft formats a self-email draft", async () => {
-    googleapisMock.__mock.draftsCreate.mockResolvedValue({ data: { id: "briefing-draft-1" } });
+  test("sendBriefingHtmlEmail sends the rendered email to MY_EMAIL", async () => {
+    googleapisMock.__mock.messagesSend.mockResolvedValue({ data: { id: "briefing-msg-1" } });
 
-    const body = buildBriefingNotificationBody(
-      {
+    const messageId = await sendBriefingHtmlEmail({
+      date: "2026-03-26",
+      applyNow: [],
+      newRoles: [
+        {
+          rank: 1,
+          score: 92,
+          company: "Anthropic",
+          role: "Software Engineer",
+          location: "San Francisco, CA",
+          whyItFits: "Strong backend/platform fit",
+          topRisk: null,
+          applyLink: "https://example.com/jobs/1",
+          isProspect: true,
+          remoteFlag: false,
+          extractedSkills: ["Python", "Kubernetes"],
+          stackMatch: 6,
+          applicationStatus: null,
+        },
+      ],
+      followups: [],
+      drafts: [],
+      funnel: null,
+      appliedCount: 0,
+      workflowCounts: { saved: 0, drafted: 0, applied: 0, interview: 0 },
+      totalTracked: 1,
+      sourcesScanned: 1,
+    });
+
+    expect(messageId).toBe("briefing-msg-1");
+    expect(
+      buildBriefingEmailSubject({
         date: "2026-03-26",
         newRoles: [
           {
@@ -181,80 +221,64 @@ describe("Gmail draft integration", () => {
             topRisk: null,
             applyLink: "https://example.com/jobs/1",
             isProspect: true,
+            remoteFlag: false,
+            extractedSkills: ["Python"],
+            stackMatch: 2,
+            applicationStatus: null,
           },
         ],
-        followups: [],
-        drafts: [],
-        funnel: null,
-      },
-      "https://docs.google.com/document/d/doc123/edit",
-    );
+      }),
+    ).toContain("March 26, 2026");
 
-    expect(buildBriefingNotificationSubject({ date: "2026-03-26" })).toBe("Daily Job Hunt Briefing — 2026-03-26");
-    expect(body).toContain("New roles: 1");
-    expect(body).toContain("Top score: 92");
-    expect(body).toContain("Doc: https://docs.google.com/document/d/doc123/edit");
-    expect(body).toContain("1. Anthropic — Software Engineer [92]");
-
-    const draftId = await createBriefingNotificationDraft(
-      {
-        date: "2026-03-26",
-        newRoles: [
-          {
-            rank: 1,
-            score: 92,
-            company: "Anthropic",
-            role: "Software Engineer",
-            location: "San Francisco, CA",
-            whyItFits: "Strong backend/platform fit",
-            topRisk: null,
-            applyLink: "https://example.com/jobs/1",
-            isProspect: true,
-          },
-        ],
-        followups: [],
-        drafts: [],
-        funnel: null,
-      },
-      "https://docs.google.com/document/d/doc123/edit",
-    );
-
-    expect(draftId).toBe("briefing-draft-1");
-    const call = googleapisMock.__mock.draftsCreate.mock.calls[0][0];
-    const decoded = decodeRaw(call.requestBody.message.raw);
-    expect(decoded).toContain("To: anish@example.com");
-    expect(decoded).toContain("Subject: Daily Job Hunt Briefing — 2026-03-26");
+    const call = googleapisMock.__mock.messagesSend.mock.calls[0][0];
+    const decoded = decodeRaw(call.requestBody.raw);
+    expect(decoded).toContain("To: foo@example.com");
+    expect(decoded).toContain("Subject: =?UTF-8?B?");
+    expect(decoded).toContain("Content-Type: text/html; charset=utf-8");
+    expect(decoded).toContain("Job Hunt OS");
+    expect(decoded).toContain("Anthropic");
   });
 
-  test("notify creates a Gmail draft for the latest briefing", async () => {
-    googleapisMock.__mock.draftsCreate.mockResolvedValue({ data: { id: "notify-draft-1" } });
-
-    fs.writeFileSync(
-      path.join(tmpDir, "data", "briefing-docs.json"),
-      JSON.stringify({ "2026-03-26": "doc123" }, null, 2),
-    );
-    const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
-    db.prepare(`UPDATE jobs SET created_at = ?, updated_at = ?`).run("2026-03-26T10:00:00.000Z", "2026-03-26T10:00:00.000Z");
-
-    const result = await runNotifyCommand();
-
-    expect(result).toContain("Gmail draft created for briefing 2026-03-26");
-    const call = googleapisMock.__mock.draftsCreate.mock.calls.at(-1)?.[0];
-    const decoded = decodeRaw(call.requestBody.message.raw);
-    expect(decoded).toContain("To: anish@example.com");
-    expect(decoded).toContain("Doc: https://docs.google.com/document/d/doc123/edit");
-  });
-
-  test("notify skips cleanly when NOTIFY_EMAIL_TO is missing", async () => {
+  test("sendBriefingHtmlEmail falls back to the authenticated Gmail profile email", async () => {
     delete process.env.NOTIFY_EMAIL_TO;
-    fs.writeFileSync(
-      path.join(tmpDir, "data", "briefing-docs.json"),
-      JSON.stringify({ "2026-03-26": "doc123" }, null, 2),
-    );
+    delete process.env.MY_EMAIL;
+    googleapisMock.__mock.getProfile.mockResolvedValue({ data: { emailAddress: "profile@example.com" } });
+    googleapisMock.__mock.messagesSend.mockResolvedValue({ data: { id: "briefing-msg-2" } });
+
+    await sendBriefingHtmlEmail({
+      date: "2026-03-26",
+      applyNow: [],
+      newRoles: [],
+      followups: [],
+      drafts: [],
+      funnel: null,
+      appliedCount: 0,
+      workflowCounts: { saved: 0, drafted: 0, applied: 0, interview: 0 },
+      totalTracked: 0,
+      sourcesScanned: 0,
+    });
+
+    const call = googleapisMock.__mock.messagesSend.mock.calls[0][0];
+    const decoded = decodeRaw(call.requestBody.raw);
+    expect(decoded).toContain("To: profile@example.com");
+    expect(googleapisMock.__mock.getProfile).toHaveBeenCalledWith({ userId: "me" });
+  });
+
+  test("notify resends Gmail briefing for the latest scan", async () => {
+    googleapisMock.__mock.messagesSend.mockResolvedValue({ data: { id: "notify-msg-1" } });
 
     const result = await runNotifyCommand();
 
-    expect(result).toBe("Gmail notification skipped: NOTIFY_EMAIL_TO not configured");
-    expect(googleapisMock.__mock.draftsCreate).not.toHaveBeenCalled();
+    expect(result).toContain("Gmail briefing sent for");
+    expect(googleapisMock.__mock.messagesSend).toHaveBeenCalled();
+  });
+
+  test("notify skips when no email recipient is configured", async () => {
+    delete process.env.NOTIFY_EMAIL_TO;
+    delete process.env.MY_EMAIL;
+    googleapisMock.__mock.getProfile.mockResolvedValue({ data: {} });
+    const result = await runNotifyCommand();
+
+    expect(result).toBe("Gmail notification skipped: MY_EMAIL (or NOTIFY_EMAIL_TO) not configured");
   });
 });

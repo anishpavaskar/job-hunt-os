@@ -454,10 +454,12 @@ function buildWhyMatch(job: JobRecord): string[] {
 }
 
 function hasMinimumApplyFit(breakdown: NextActionRecord["scoreBreakdown"]): boolean {
-  return (
-    breakdown.roleFit >= TODAY_RANKING.applyMinRoleFit
-    && breakdown.stackFit >= TODAY_RANKING.applyMinStackFit
-  );
+  const roleFitOk = breakdown.roleFit >= TODAY_RANKING.applyMinRoleFit;
+  const stackFitOk = breakdown.stackFit >= TODAY_RANKING.applyMinStackFit;
+  const combinedFitOk =
+    (breakdown.roleFit + breakdown.stackFit) >= TODAY_RANKING.applyMinCombinedFit;
+
+  return roleFitOk && stackFitOk && combinedFitOk;
 }
 
 function hasStrongTechnicalFit(breakdown: NextActionRecord["scoreBreakdown"]): boolean {

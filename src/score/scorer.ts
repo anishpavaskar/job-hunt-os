@@ -161,6 +161,12 @@ function scoreSeniorityFit(opportunity: NormalizedOpportunity, profile?: Profile
   if (!opportunity.seniorityHint) return Math.floor(SCORING_WEIGHTS.seniorityFit / 2);
   const seniorityText = opportunity.seniorityHint.toLowerCase();
   const target = inferProfileSeniority(profile);
+
+  const isStaffPlusRole = ["staff", "principal", "director", "manager"].some((keyword) =>
+    seniorityText.includes(keyword),
+  );
+  const isSeniorRole = seniorityText.includes("senior") || seniorityText.includes("lead");
+
   if (SENIORITY_KEYWORDS[target].some((keyword) => seniorityText.includes(keyword))) {
     return SCORING_WEIGHTS.seniorityFit;
   }
@@ -168,7 +174,9 @@ function scoreSeniorityFit(opportunity: NormalizedOpportunity, profile?: Profile
     return 6;
   }
   if (target === "mid" && SENIORITY_KEYWORDS.senior.some((keyword) => seniorityText.includes(keyword))) {
-    return 8;
+    if (isStaffPlusRole) return 1;
+    if (isSeniorRole) return 4;
+    return 3;
   }
   return 4;
 }
@@ -198,6 +206,10 @@ function buildRiskBullets(
   company: YcCompany,
 ): string[] {
   const risks: string[] = [];
+  const seniorityText = opportunity.seniorityHint?.toLowerCase() ?? "";
+  if (["staff", "principal", "director"].some((keyword) => seniorityText.includes(keyword)) && breakdown.seniorityFit <= 4) {
+    risks.push("Likely too senior for your current target level");
+  }
   if (breakdown.seniorityFit <= 6) risks.push("Seniority fit is uncertain");
   if (!opportunity.remoteFlag) risks.push("Not clearly remote");
   if ((opportunity.compensationMin ?? opportunity.compensationMax) == null) risks.push("Compensation not disclosed");

@@ -6,6 +6,11 @@ const config: Config = {
   roots: ["<rootDir>/tests"],
   testMatch: ["**/*.test.ts"],
   verbose: true,
+  globals: {
+    "ts-jest": {
+      tsconfig: "tsconfig.test.json",
+    },
+  },
 };
 
 export default config;

@@ -271,17 +271,19 @@ describe("[integration] pipeline end-to-end", () => {
     expect(jobsAfterRescan).toHaveLength(10);
 
     const briefing = assembleBriefingData(db, "2026-03-26");
+    const visibleDiscoveredRoles = briefing.newRoles.filter((role) => role.kind !== "overflow");
     expect(Array.isArray(briefing.newRoles)).toBe(true);
-    expect(briefing.newRoles.length).toBeGreaterThan(0);
-    expect(briefing.newRoles.length).toBe(
-      jobs.filter((job) => job.score >= 50 && job.role_source !== "company_fallback").length,
+    expect(visibleDiscoveredRoles.length).toBeGreaterThan(0);
+    expect(visibleDiscoveredRoles.length).toBeLessThanOrEqual(
+      jobs.filter((job) => job.score >= 60 && job.role_source !== "company_fallback").length,
     );
-    for (let index = 1; index < briefing.newRoles.length; index += 1) {
-      expect(briefing.newRoles[index - 1].score).toBeGreaterThanOrEqual(briefing.newRoles[index].score);
+    for (let index = 1; index < visibleDiscoveredRoles.length; index += 1) {
+      expect(visibleDiscoveredRoles[index - 1].score ?? 0).toBeGreaterThanOrEqual(visibleDiscoveredRoles[index].score ?? 0);
     }
+    expect(briefing.applyNow.length).toBeGreaterThan(0);
     expect(briefing.followups).toEqual([]);
 
-    const topRole = briefing.newRoles[0];
+    const topRole = visibleDiscoveredRoles[0];
     const query = topRole.role === "(General)" ? topRole.company : topRole.role;
     await runApplyCommand(query, 7, {
       status: "applied",

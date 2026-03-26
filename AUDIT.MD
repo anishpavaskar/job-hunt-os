@@ -1,1312 +1,175 @@
-# Full Audit: `job-hunt-os`
+# Audit: `job-hunt-os` Working Tree
 
-## Executive Summary
+Scope: current `my-service` working tree after the scan quality / score calibration pass and the in-flight briefing/email changes.
 
-This repository is no longer a mixed experiment. It is now a local-first, SQLite-backed, CLI-first job-hunt operating system MVP.
+This audit is a review of the code as it exists now, not a summary of the original intent. The scan/scoring work is in solid shape overall. The briefing path is where the current correctness and product-integration risks are concentrated.
 
-The repo is centered on one product loop:
+## Findings
 
-1. capture a candidate profile
-2. ingest roles from YC and manual sources
-3. normalize and score them
-4. review the best opportunities
-5. draft outreach and applications
-6. track application state and history
-7. manage follow-ups
-8. measure outcomes
-9. surface the best actions to take today
+1. High: `briefing` and `notify` no longer compose.
 
-The current product is strong enough to support an actual daily job-search workflow, especially for a YC-first or manually imported role pipeline.
+- [`src/commands/briefing.ts:245`](/Users/anishpav/Anish_Personal_projects/my-service/src/commands/briefing.ts#L245) now sends HTML email directly via [`sendBriefingHtmlEmail()` in `src/integrations/gmail.ts:95`](/Users/anishpav/Anish_Personal_projects/my-service/src/integrations/gmail.ts#L95).
+- [`src/commands/notify.ts:7`](/Users/anishpav/Anish_Personal_projects/my-service/src/commands/notify.ts#L7) still depends on [`getLatestBriefingDoc()` in `src/integrations/google-docs.ts:98`](/Users/anishpav/Anish_Personal_projects/my-service/src/integrations/google-docs.ts#L98), which reads `data/briefing-docs.json`.
+- The current `briefing` command no longer writes that tracking file or creates a Google Doc, so `notify` can legitimately report “No previous briefing doc found” even after a successful `briefing` run.
+- This is a user-visible workflow regression, not just internal drift.
 
-It is intentionally:
+2. High: the briefing contract is only partially implemented.
 
-- local-first
-- SQLite-based
-- CLI-first
-- no frontend
-- no cloud infra
-- easy to tune
-- minimal but coherent
+- [`assembleBriefingData()` in `src/commands/briefing.ts:190`](/Users/anishpav/Anish_Personal_projects/my-service/src/commands/briefing.ts#L190) always returns `applyNow: []` at [`src/commands/briefing.ts:225`](/Users/anishpav/Anish_Personal_projects/my-service/src/commands/briefing.ts#L225).
+- The shared `BriefingData` type declares a real `applyNow` section in [`src/integrations/google-docs.ts:54`](/Users/anishpav/Anish_Personal_projects/my-service/src/integrations/google-docs.ts#L54).
+- The working-tree tests explicitly expect a populated, deduped apply-now section in [`tests/briefing.test.ts:292`](/Users/anishpav/Anish_Personal_projects/my-service/tests/briefing.test.ts#L292).
+- This means the top-level data shape advertises a product capability that the assembler does not currently provide.
 
----
+3. Medium: new-role counts will be wrong once overflow rows are emitted.
 
-## What This Project Is
+- `BriefingNewRole` already supports `kind: "overflow"` in [`src/integrations/google-docs.ts:9`](/Users/anishpav/Anish_Personal_projects/my-service/src/integrations/google-docs.ts#L9).
+- The tests expect overflow rows to be excluded from summary counts in [`tests/briefing.test.ts:345`](/Users/anishpav/Anish_Personal_projects/my-service/tests/briefing.test.ts#L345).
+- But `getBriefingSmsSummary()` counts `data.newRoles.length` directly at [`src/commands/briefing.ts:236`](/Users/anishpav/Anish_Personal_projects/my-service/src/commands/briefing.ts#L236).
+- `buildBriefingEmailSubject()` does the same at [`src/integrations/gmail.ts:85`](/Users/anishpav/Anish_Personal_projects/my-service/src/integrations/gmail.ts#L85).
+- The email header also prints `newRoles.length` in [`src/templates/briefing-email.ts:222`](/Users/anishpav/Anish_Personal_projects/my-service/src/templates/briefing-email.ts#L222).
+- If overflow rows land, user-facing counts and subjects will overstate how many actual roles were found.
 
-`job-hunt-os` is a personal job-search operating system. It helps one candidate maintain a structured, persistent workflow for discovering roles, ranking fit, drafting outreach, tracking applications, managing follow-ups, and reviewing outcome analytics.
+4. Medium: the “scanned X sources” metric is mislabeled.
 
-It is not just a job scraper.
+- [`assembleBriefingData()` in `src/commands/briefing.ts:219`](/Users/anishpav/Anish_Personal_projects/my-service/src/commands/briefing.ts#L219) derives `sourcesScanned` from `SELECT COUNT(*) FROM job_sources`.
+- The footer renders that as “scanned X sources” in [`src/templates/briefing-email.ts:255`](/Users/anishpav/Anish_Personal_projects/my-service/src/templates/briefing-email.ts#L255).
+- `job_sources` is cumulative identity data for companies/providers already seen, not the number of sources scanned in the latest run and not even the number of top-level providers.
+- The metric will drift upward over time and misrepresent current scan coverage.
 
-It is trying to be an end-to-end operating loop for job hunting:
+5. Low: profile-loading failures are silently swallowed.
 
-- discovery
-- prioritization
-- execution
-- follow-through
-- learning from outcomes
+- [`assembleBriefingData()` catches all errors from `loadProfile()` at `src/commands/briefing.ts:199`](/Users/anishpav/Anish_Personal_projects/my-service/src/commands/briefing.ts#L199).
+- That means a malformed `data/profile.json` degrades into `stackMatch = 0` everywhere instead of surfacing a configuration error.
+- This is survivable, but it is poor debuggability for a personalization-heavy workflow.
 
----
+6. Low: docs and command descriptions have drifted from the actual behavior.
 
-## What The Repo Seeks To Do
+- The README still says `briefing` “Generate AI-powered daily briefing” and `notify` “Send SMS notification” in [`README.md:156`](/Users/anishpav/Anish_Personal_projects/my-service/README.md#L156).
+- The current code describes `briefing` as an HTML email sender in [`src/commands/briefing.ts:247`](/Users/anishpav/Anish_Personal_projects/my-service/src/commands/briefing.ts#L247) and `notify` as a Gmail draft creator for the latest doc in [`src/commands/notify.ts:29`](/Users/anishpav/Anish_Personal_projects/my-service/src/commands/notify.ts#L29).
+- This is not a runtime bug, but it makes the product surface harder to reason about.
 
-At the product level, this repo is trying to do all of the following:
+## Top-Down Overview
 
-- maintain a reusable candidate profile for scoring
-- extract structured candidate details from a resume
-- ingest job opportunities from YC hiring data
-- ingest job opportunities manually from CSV and JSON
-- normalize all external role data into one schema
-- persist opportunities durably in SQLite
-- score roles by candidate fit and actionability
-- explain why a role ranks well
-- surface risks, not just positives
-- help the user decide what to do next
-- generate personalized outreach drafts
-- store draft variants durably
-- track application status over time
-- keep a full event history of workflow changes
-- schedule, list, and update follow-ups
-- capture outcomes like replies, interviews, and rejections
-- compute funnel analytics and breakdowns
-- provide a daily action queue of the highest-leverage next steps
+### 1. Core architecture
 
-That is the core ambition of the project.
+The repo is a local-first CLI workflow built around:
 
----
-
-## Product Boundaries
-
-### In scope
-
-- local job-search operations
-- candidate profile management
-- YC role/company ingestion
-- manual role import
-- scoring and review
-- outreach drafting
-- application workflow
-- follow-up tracking
-- analytics
-- action prioritization
-
-### Explicitly out of scope right now
-
-- frontend UI
-- hosted backend
-- cloud sync
-- email sending
-- ATS integrations
-- browser automation
-- collaborative multi-user usage
-
-Those can come later, but the current MVP is intentionally centered on a strong local CLI workflow.
-
----
-
-## Current Top-Level Product Surface
-
-The repo exposes a single CLI entrypoint through [`src/cli.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/cli.ts).
-
-Current commands from [`package.json`](/Users/anishpav/Anish_Personal_projects/my-service/package.json):
-
-- `npm run scan`
-- `npm run import`
-- `npm run review`
-- `npm run stats`
-- `npm run today`
-- `npm run next`
-- `npm run draft`
-- `npm run drafts`
-- `npm run apply`
-- `npm run followups`
-- `npm run profile`
-
-Support scripts:
-
-- `npm run build`
-- `npm run dev`
-- `npm run cli`
-- `npm run test`
-- `npm run typecheck`
-
-This is now a clean and coherent command surface.
-
----
-
-## Current File Structure
-
-### Config
-
-- [`config/scoring.ts`](/Users/anishpav/Anish_Personal_projects/my-service/config/scoring.ts)
-
-### CLI entrypoint
-
-- [`src/cli.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/cli.ts)
-
-### Commands
-
-- [`src/commands/apply.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/commands/apply.ts)
-- [`src/commands/draft.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/commands/draft.ts)
-- [`src/commands/drafts.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/commands/drafts.ts)
-- [`src/commands/followups.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/commands/followups.ts)
-- [`src/commands/import.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/commands/import.ts)
-- [`src/commands/profile.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/commands/profile.ts)
-- [`src/commands/review.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/commands/review.ts)
-- [`src/commands/scan.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/commands/scan.ts)
-- [`src/commands/stats.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/commands/stats.ts)
-- [`src/commands/today.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/commands/today.ts)
-
-### Candidate config
-
-- [`src/config/profile.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/config/profile.ts)
-- [`src/config/types.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/config/types.ts)
-
-### Persistence
-
-- [`src/db/index.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/db/index.ts)
-- [`src/db/repositories.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/db/repositories.ts)
-- [`src/db/schema.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/db/schema.ts)
-- [`src/db/types.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/db/types.ts)
-
-### Filtering and ingestion
-
-- [`src/filter/jobs.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/filter/jobs.ts)
-- [`src/ingest/normalize.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/ingest/normalize.ts)
-- [`src/ingest/yc.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/ingest/yc.ts)
-
-### Scoring
-
-- [`src/score/scorer.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/score/scorer.ts)
-
-### Tests
-
-- [`tests/apply.test.ts`](/Users/anishpav/Anish_Personal_projects/my-service/tests/apply.test.ts)
-- [`tests/db.test.ts`](/Users/anishpav/Anish_Personal_projects/my-service/tests/db.test.ts)
-- [`tests/drafts.test.ts`](/Users/anishpav/Anish_Personal_projects/my-service/tests/drafts.test.ts)
-- [`tests/followups.test.ts`](/Users/anishpav/Anish_Personal_projects/my-service/tests/followups.test.ts)
-- [`tests/import.test.ts`](/Users/anishpav/Anish_Personal_projects/my-service/tests/import.test.ts)
-- [`tests/migration.test.ts`](/Users/anishpav/Anish_Personal_projects/my-service/tests/migration.test.ts)
-- [`tests/profile.test.ts`](/Users/anishpav/Anish_Personal_projects/my-service/tests/profile.test.ts)
-- [`tests/review.test.ts`](/Users/anishpav/Anish_Personal_projects/my-service/tests/review.test.ts)
-- [`tests/scan.test.ts`](/Users/anishpav/Anish_Personal_projects/my-service/tests/scan.test.ts)
-- [`tests/stats.test.ts`](/Users/anishpav/Anish_Personal_projects/my-service/tests/stats.test.ts)
-- [`tests/today.test.ts`](/Users/anishpav/Anish_Personal_projects/my-service/tests/today.test.ts)
-
----
-
-## Architecture Overview
-
-The architecture now has a clear flow:
-
-`profile -> ingest/import -> normalize -> score -> persist -> review -> draft/apply/follow-up -> analytics -> daily action queue`
-
-That is the biggest architectural success in the repo.
-
-Each area has a clear responsibility:
-
-- `commands/`: CLI UX and orchestration
-- `config/`: candidate profile and tunable settings
-- `db/`: schema, migrations, repositories, types
-- `ingest/`: source-specific fetch and normalization
-- `filter/`: review filtering
-- `score/`: ranking logic
-- `tests/`: regression protection
-
-This is a clean MVP architecture.
-
----
-
-## Source Of Truth
-
-SQLite is the source of truth.
-
-That matters because the repo has moved beyond temporary JSON snapshots and now maintains durable state for:
-
-- opportunities
-- applications
-- follow-ups
-- drafts
-- analytics inputs
-- workflow history
-
-JSON still exists where it makes sense:
-
-- `data/profile.json` for a lightweight candidate profile
-- `data/yc_hiring_raw.json` for optional raw source debugging
-
-But the operational system of record is SQLite.
-
----
-
-## Database Audit
-
-The database is initialized via [`src/db/index.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/db/index.ts) and schema management lives in [`src/db/schema.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/db/schema.ts).
-
-### Current database file
-
-- `data/job_hunt.db`
-
-### Tables
-
-#### `job_sources`
-
-Purpose:
-
-- store source/provider identity for ingested jobs
-
-Important fields:
-
-- `provider`
-- `external_id`
-- `url`
-
-Used for:
-
-- distinguishing YC vs manual import
-- maintaining a stable source key
-
-#### `scans`
-
-Purpose:
-
-- persist each ingestion run
-
-Important fields:
-
-- `provider`
-- `started_at`
-- `completed_at`
-- `raw_count`
-- `valid_count`
-
-Used for:
-
-- historical scan tracking
-- future observability
-
-#### `jobs`
-
-Purpose:
-
-- store normalized opportunities
-
-Important fields:
-
-- source and scan identity
-- `external_key`
-- `role_external_id`
-- `role_source`
-- `company_name`
-- `title`
-- `summary`
-- `website`
-- `locations`
-- `remote_flag`
-- `job_url`
-- `regions_json`
-- `tags_json`
-- `industries_json`
-- `stage`
-- `batch`
-- `team_size`
-- `seniority_hint`
-- `compensation_min`
-- `compensation_max`
-- `compensation_currency`
-- `compensation_period`
-- `extracted_skills_json`
-- `top_company`
-- `is_hiring`
-- `score`
-- `score_reasons_json`
-- `score_breakdown_json`
-- `explanation_bullets_json`
-- `risk_bullets_json`
-- `status`
-
-This is the core opportunity model in the system.
-
-#### `applications`
-
-Purpose:
-
-- store the current application/workflow state for each opportunity
-
-Important fields:
-
-- `job_id`
-- `applied_at`
-- `status`
-- `notes`
-- `applied_url`
-- `resume_version`
-- `outreach_draft_version`
-- `response_received`
-- `response_type`
-- `interview_stage`
-- `rejection_reason`
-- `last_contacted_at`
-
-This lets the repo represent a job hunt as a real workflow rather than a ranked list.
-
-#### `application_events`
-
-Purpose:
-
-- provide a durable history of application changes
-
-Important fields:
-
-- `application_id`
-- `event_type`
-- `previous_status`
-- `next_status`
-- `note`
-- `metadata_json`
-- `created_at`
-
-Used for:
-
-- status transition durability
-- follow-up audit history
-- richer analytics later
-- preserving context over time
-
-#### `followups`
-
-Purpose:
-
-- store pending and resolved follow-up reminders
-
-Important fields:
-
-- `job_id`
-- `application_id`
-- `due_at`
-- `status`
-- `note`
-
-Supports:
-
-- pending follow-ups
-- completed follow-ups
-- skipped follow-ups
-- rescheduled follow-ups
-
-#### `drafts`
-
-Purpose:
-
-- persist generated outreach/application draft variants
-
-Important fields:
-
-- `job_id`
-- `application_id`
-- `variant`
-- `generated_content`
-- `edited_content`
-- timestamps
-
-Used for:
-
-- preserving drafts across sessions
-- maintaining draft variants
-- connecting drafts to workflow state
-
-### Migration story
-
-The repo includes migration support for:
-
-- older `jobs` tables
-- older `applications` tables
-- older `drafts` tables
-- adding newer score and skill columns
-- adding application outcome fields
-- adding draft application linkage
-
-This is a very important maturity signal for the repo. It means the local database can evolve without forcing a reset.
-
----
-
-## Candidate Profile Audit
-
-Candidate profile support lives in:
-
-- [`src/commands/profile.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/commands/profile.ts)
-- [`src/config/profile.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/config/profile.ts)
-- [`src/config/types.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/config/types.ts)
-
-### Current profile capabilities
-
-- accept `.pdf` resumes
-- accept `.txt` resumes
-- extract text from PDF
-- attempt AI extraction if `ANTHROPIC_API_KEY` is present
-- fall back to local heuristic extraction if AI is unavailable or fails
-- validate extracted data with Zod
-- save normalized profile to `data/profile.json`
-
-### Current profile schema
-
-- `name`
-- `skills_tier1`
-- `skills_tier2`
-- `domains`
-- `years_of_experience`
-- `location`
-- `preferences.remote`
-- `preferences.healthcare`
-- `preferences.early_stage`
-
-### Why this matters
-
-This is how the system personalizes scoring. It makes the repo candidate-aware rather than generic.
-
-### Current tradeoff
-
-The profile remains file-based rather than DB-backed.
-
-That is a reasonable MVP decision because:
-
-- it keeps persistence scope small
-- it is easy to inspect and edit manually
-- it is stable enough for a single-user local workflow
-
----
-
-## Ingestion Audit
-
-Ingestion lives in:
-
-- [`src/ingest/yc.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/ingest/yc.ts)
-- [`src/ingest/normalize.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/ingest/normalize.ts)
-- [`src/commands/scan.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/commands/scan.ts)
-- [`src/commands/import.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/commands/import.ts)
-
-### YC ingestion features
-
-- fetch YC hiring data
-- validate upstream payloads
-- skip malformed records instead of crashing
-- persist raw YC payload to `data/yc_hiring_raw.json`
-- normalize YC company-level or role-level structures
-- upsert records into SQLite
-- record scan metadata
-
-### Role-level ingestion features
-
-- store actual roles when role data exists
-- preserve company-level fallback rows when the source is sparse
-- normalize role title
-- normalize role URL
-- normalize description
-- normalize location
-- normalize remote flag
-- normalize seniority hints
-- normalize compensation hints if present
-- extract skills from title, summary, tags, industries, and description
-
-### Manual import features
-
-- import JSON arrays of roles
-- import CSV files of roles
-- validate incoming rows
-- skip invalid rows while keeping valid ones
-- normalize imported rows into the same job schema
-- score imported jobs with the same scoring model
-- persist imported jobs under a provider like `manual`
-
-### Why this matters
-
-This gives the system two important strengths:
-
-- a live source for recurring discovery
-- a manual path that makes the repo useful beyond YC
-
----
-
-## Normalization Audit
-
-Normalization is one of the most important parts of the repo.
-
-Its job is to convert messy external input into one internal opportunity model.
-
-Current normalization covers:
-
-- company name
-- role title
-- role URL / job URL
-- summary / description
-- location text
-- remote flag
-- stage
-- batch
-- team size
-- tags
-- industries
-- seniority hints
-- compensation hints
-- extracted skills
-- source identity
-- fallback handling when role-level detail is absent
-
-This is what allows `review`, `apply`, `draft`, `stats`, and `today` to operate over one coherent schema.
-
----
-
-## Scoring Audit
-
-Scoring lives in:
-
-- [`src/score/scorer.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/score/scorer.ts)
-- [`config/scoring.ts`](/Users/anishpav/Anish_Personal_projects/my-service/config/scoring.ts)
-
-### Current scoring dimensions
-
-The total score is broken into:
-
-- `roleFit`
-- `stackFit`
-- `seniorityFit`
-- `freshness`
-- `companySignal`
-
-### What the system stores per job
-
-- total score
-- score reasons
-- score breakdown JSON
-- explanation bullets
-- risk bullets
-
-### What scoring is trying to answer
-
-Not just:
-
-- "Is this a good job?"
-
-But:
-
-- "Is this a good role for this candidate right now?"
-
-### Signals represented in current scoring
-
-- title and role-family match
-- candidate skill overlap
-- domain overlap
-- seniority alignment
-- hiring freshness
-- stage and company-quality hints
-- remote friendliness
-- compensation visibility
-- source and company signals
-
-### Why the score design is good
-
-- it is interpretable
-- it is tunable
-- it is not a black box
-- it supports explanation in the review surface
-- it supports action prioritization later
-
-### Current limitations
-
-- still heuristic
-- not based on true role outcome learning yet
-- depends on source richness
-- seniority and freshness are still inferred coarsely
-
-These are acceptable MVP constraints.
-
----
-
-## Review Audit
-
-Review lives in [`src/commands/review.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/commands/review.ts).
-
-### Current review features
-
-- list ranked opportunities from SQLite
-- filter by query
-- filter by minimum score
-- filter by status
-- filter by remote-only
-- support a `--today` jobs-focused review filter
-- show role/company summary
-- show total score
-- show score breakdown
-- show top reasons
-- show top risk
-- show extracted skills
-- show recommended next action
-
-### Review quality improvements already implemented
-
-- prefers actual role rows over company fallback rows when possible
-- surfaces positives and risks together
-- exposes a next-step recommendation
-- supports action-oriented filtering
-
-### What review is good at now
-
-- helping the user decide what to inspect
-- helping the user decide whether a role looks promising
-- making the score legible rather than mysterious
-
-### What review does not yet do
-
-- multi-column TUI workflows
-- grouped saved searches
-- interactive triage UI
-- direct note editing inside review
-
-Those are possible future upgrades, not missing MVP basics.
-
----
-
-## Daily Action Queue Audit
-
-The daily action queue lives in [`src/commands/today.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/commands/today.ts).
-
-This is one of the most product-leverage-heavy features in the repo.
-
-### Current `today` / `next` capabilities
-
-- aggregate due follow-ups
-- aggregate drafted-but-unsent applications
-- aggregate strong unapplied roles
-- rank actions by urgency plus opportunity quality
-- show concise reasons
-- show one surfaced risk
-- show a recommended next step
-
-### Why this feature matters
-
-This changes the repo from:
-
-- a tracker
-
-into:
-
-- a daily operating system
-
-It answers:
-
-- "What should I do right now?"
-
-That is one of the strongest product ideas in the system.
-
----
-
-## Drafting Audit
-
-Draft support lives in:
-
-- [`src/commands/draft.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/commands/draft.ts)
-- [`src/commands/drafts.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/commands/drafts.ts)
-
-### Current drafting features
-
-- generate a role-aware outreach draft
-- customize draft copy from stored job context
-- optionally save generated drafts to SQLite
-- support multiple named variants
-- store edited content separately from generated content
-- list saved drafts
-- show a saved draft
-- attach drafts to jobs
-- attach drafts to applications when one exists
-- record draft save/update events in application history when applicable
-
-### Why this matters
-
-This makes drafting durable instead of ephemeral.
-
-That is important because job search work is iterative. A good operating system should not lose draft work between sessions.
-
----
-
-## Application Workflow Audit
-
-Application workflow support lives primarily in:
-
-- [`src/commands/apply.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/commands/apply.ts)
-- [`src/commands/followups.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/commands/followups.ts)
-- [`src/db/repositories.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/db/repositories.ts)
-
-### Current application states
-
-- `saved`
-- `shortlisted`
-- `drafted`
-- `applied`
-- `followup_due`
-- `responded`
-- `replied`
-- `interview`
-- `rejected`
-- `archived`
-
-### Current application features
-
-- create or update application state
-- store notes
-- store applied URL
-- store resume version
-- store outreach draft version
-- store response status
-- store response type
-- store interview stage
-- store rejection reason
-- store last contacted timestamp
-- create follow-ups from application updates
-- keep jobs and applications in sync at the workflow level
-
-### Event history features
-
-Every important workflow update is recorded durably:
-
-- status changes
-- follow-up creation
-- follow-up completion
-- follow-up skipping
-- follow-up rescheduling
-- draft saved / updated when tied to an application
-
-That makes the system auditable and much more trustworthy over time.
-
----
-
-## Follow-Up Audit
-
-Follow-up support lives in [`src/commands/followups.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/commands/followups.ts).
-
-### Current follow-up features
-
-- list pending follow-ups
-- mark follow-up done
-- skip follow-up
-- reschedule follow-up
-- attach notes to follow-up updates
-- record those updates as application events when possible
-
-### Why this matters
-
-Follow-through is a huge part of real-world job hunts. This is one of the features that makes the repo operational rather than merely analytical.
-
----
-
-## Outcome Tracking Audit
-
-Outcome tracking is built into the application model and analytics flow.
-
-### Current outcome fields
-
-- `response_received`
-- `response_type`
-- `interview_stage`
-- `rejection_reason`
-- `last_contacted_at`
-
-### Why this matters
-
-This is what makes analytics meaningful later. Without outcome fields, there is no real feedback loop between discovery and results.
-
----
-
-## Analytics Audit
-
-Analytics lives in [`src/commands/stats.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/commands/stats.ts).
-
-### Current analytics features
-
-- show funnel counts for:
-  - saved
-  - applied
-  - replied
-  - interview
-- show score-range breakdowns
-- show source breakdowns
-- compute conversion-style metrics from workflow state
-
-### Why this matters
-
-This lets the user learn from the process:
-
-- are high-score jobs converting better?
-- is one source performing better than another?
-- where is the funnel collapsing?
-
-That is a meaningful step toward a self-improving operating system.
-
----
-
-## Current End-To-End Workflows
-
-### Workflow 1: set up profile
-
-1. run `npm run profile -- /path/to/resume.pdf`
-2. inspect or edit `data/profile.json`
-
-### Workflow 2: ingest opportunities
-
-1. run `npm run scan`
-2. or run `npm run import -- ./roles.json`
-3. or run `npm run import -- ./roles.csv --format csv`
-
-### Workflow 3: review and triage
-
-1. run `npm run review`
-2. optionally filter by score, remote, status, or query
-3. decide whether to save, shortlist, or draft
-
-### Workflow 4: draft outreach
-
-1. run `npm run draft -- "Role Name"`
-2. optionally save the draft with `--save --variant v1`
-3. review saved drafts with `npm run drafts -- list`
-
-### Workflow 5: update application state
-
-1. run `npm run apply -- "Role Name" --status drafted`
-2. later run `npm run apply -- "Role Name" --status applied --applied-url ...`
-3. track status changes over time
-
-### Workflow 6: manage follow-ups
-
-1. run `npm run followups`
-2. mark due items done
-3. skip or reschedule when needed
-
-### Workflow 7: see what matters today
-
-1. run `npm run today`
-2. or run `npm run next`
-3. follow the ranked action queue
-
-### Workflow 8: review outcomes
-
-1. run `npm run stats`
-2. inspect funnel and breakdowns
-3. use that to tune search and scoring
-
----
-
-## Complete Feature Inventory
-
-Below is a consolidated feature list of what the project currently supports.
-
-### Core platform features
-
-- CLI-first architecture
+- source ingestion
+- normalization
+- scoring
 - SQLite persistence
-- migration-safe schema evolution
-- single local-user workflow
-- structured test suite
-- tunable config
-
-### Profile features
-
-- resume ingestion from `.pdf`
-- resume ingestion from `.txt`
-- AI-assisted profile extraction if configured
-- heuristic fallback profile extraction
-- structured candidate profile persistence
-- manual profile editing
-
-### Ingestion features
-
-- YC hiring feed fetch
-- source validation with Zod
-- raw payload persistence
-- scan run persistence
-- manual JSON import
-- manual CSV import
-- invalid-row skipping
-- provider-aware ingestion
-
-### Role/opportunity modeling features
-
-- role-level storage
-- company fallback storage
-- normalized role title
-- normalized job URL
-- normalized summary
-- normalized location
-- normalized remote flag
-- normalized seniority hints
-- normalized compensation hints
-- extracted skills persistence
-
-### Scoring features
-
-- role fit score
-- stack fit score
-- seniority fit score
-- freshness score
-- company signal score
-- total score persistence
-- score reasons persistence
-- explanation bullets
-- risk bullets
-- config-driven tuning
-
-### Review features
-
-- ranked review
-- query filter
-- min-score filter
-- status filter
-- remote-only filter
-- jobs-focused today filter
-- role prioritization over company fallback rows
-- score breakdown display
-- reasons display
-- risk display
-- next action recommendation
-
-### Draft features
-
-- generate outreach drafts
-- role-aware draft content
-- save draft variants
-- persist edited content
-- list drafts
-- show drafts
-- link drafts to jobs
-- link drafts to applications
-- event logging on draft persistence
-
-### Application workflow features
-
-- saved state
-- shortlisted state
-- drafted state
-- applied state
-- followup_due state
-- responded state
-- replied state
-- interview state
-- rejected state
-- archived state
-- notes
-- applied URL
-- resume version
-- outreach draft version
-- current application record
-- workflow status sync with jobs
-
-### Event-history features
-
-- durable status change logging
-- metadata on application events
-- follow-up created events
-- follow-up done events
-- follow-up skipped events
-- follow-up rescheduled events
-- draft saved events
-- draft updated events
+- daily action selection
+- briefing/output integrations
 
-### Follow-up features
+The layering is still good:
 
-- create follow-ups automatically
-- list pending follow-ups
-- complete follow-ups
-- skip follow-ups
-- reschedule follow-ups
-- add follow-up notes
+- CLI orchestration in [`src/commands`](/Users/anishpav/Anish_Personal_projects/my-service/src/commands)
+- persistence in [`src/db`](/Users/anishpav/Anish_Personal_projects/my-service/src/db)
+- source adapters in [`src/ingest`](/Users/anishpav/Anish_Personal_projects/my-service/src/ingest)
+- ranking in [`src/score/scorer.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/score/scorer.ts)
+- downstream rendering/integrations in [`src/integrations`](/Users/anishpav/Anish_Personal_projects/my-service/src/integrations) and [`src/templates`](/Users/anishpav/Anish_Personal_projects/my-service/src/templates)
 
-### Outcome tracking features
+That structure is coherent and still scales for this scope.
 
-- response received flag
-- response type
-- interview stage
-- rejection reason
-- last contacted timestamp
+### 2. Scan and calibration pass
 
-### Analytics features
+The recent scan/scoring work is directionally correct and fairly disciplined.
 
-- conversion funnel counts
-- score-range breakdown
-- source breakdown
-- status-derived pipeline analytics
+- [`scan` in `src/commands/scan.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/commands/scan.ts) now distinguishes `upserted`, `new`, and `updated` instead of treating everything as one bucket.
+- Greenhouse and Lever have explicit slug audit hooks in [`src/ingest/greenhouse.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/ingest/greenhouse.ts) and [`src/ingest/lever.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/ingest/lever.ts).
+- Scorer debug is centralized through [`getOpportunityScoreDebug()` in `src/score/scorer.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/score/scorer.ts).
+- The default “real roles only” behavior is correctly threaded into [`briefing`](/Users/anishpav/Anish_Personal_projects/my-service/src/commands/briefing.ts), [`today`](/Users/anishpav/Anish_Personal_projects/my-service/src/commands/today.ts), and [`listNextActions()` in `src/db/repositories.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/db/repositories.ts#L550).
 
-### Daily operating features
+The scan-side changes look focused on correctness and debuggability, which was the right bar for this pass.
 
-- `today` command
-- `next` alias
-- cross-workflow action ranking
-- urgency-aware prioritization
-- quality-aware prioritization
-- concise reason surfacing
-- one-risk surfacing
-- recommended next-step surfacing
+### 3. Scoring
 
----
+The scoring model remains simple and legible.
 
-## What You Have Done So Far
+- role fit
+- stack fit
+- seniority fit
+- freshness
+- company signal
 
-This section summarizes the major product and engineering work already completed in the repo.
+The new scorer debug surface is useful because it exposes:
 
-### 1. Chose a clear product direction
+- extracted text
+- extracted skills
+- matched profile signals
+- final score breakdown
 
-You moved the repo away from an ambiguous mixed-purpose state and made it clearly about a CLI-first local job-hunt operating system.
+That makes calibration work practical without overcomplicating the production path.
 
-### 2. Re-centered the codebase around the CLI
+The only caution here is that seniority tuning has become more opinionated and still needs explicit regression coverage around staff/principal rejection behavior.
 
-You introduced a single root CLI entrypoint and turned the repo into a coherent command-based product.
+### 4. Daily surfaces
 
-### 3. Made SQLite the source of truth
+The “today” path is in better shape than the “briefing” path.
 
-You replaced fragile JSON-only operational state with durable tables for jobs, scans, applications, follow-ups, drafts, and workflow history.
+- [`today`](/Users/anishpav/Anish_Personal_projects/my-service/src/commands/today.ts) now defaults to real roles only and keeps fallback inclusion opt-in.
+- [`listNextActions()`](/Users/anishpav/Anish_Personal_projects/my-service/src/db/repositories.ts#L550) applies that filter consistently across follow-ups, drafted applications, and unapplied jobs.
 
-### 4. Preserved local-first simplicity
+That is a sensible default for a candidate-facing queue.
 
-You kept the product simple:
+### 5. Briefing / outbound rendering
 
-- no frontend
-- no cloud backend
-- no deployment complexity
-- no hosted state required
+This is the least settled subsystem right now.
 
-### 5. Built a real persistence layer
+The codebase simultaneously contains:
 
-You added a proper schema, repository functions, and migration safety instead of keeping the system as ad hoc scripts.
+- a Google Docs briefing model in [`src/integrations/google-docs.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/integrations/google-docs.ts)
+- a new HTML email renderer in [`src/templates/briefing-email.ts`](/Users/anishpav/Anish_Personal_projects/my-service/src/templates/briefing-email.ts)
+- a `briefing` command that sends Gmail HTML directly
+- a `notify` command that still assumes docs are the source artifact
 
-### 6. Upgraded ingestion from company-only to role-aware
+That split-brain state is the main architectural risk in the working tree.
 
-You extended the system so it can store real roles when available, while still keeping company-level fallback behavior.
+## Test Posture
 
-### 7. Improved scoring quality
+Coverage around the scan calibration pass is good:
 
-You turned scoring into a breakdown model instead of a flat score and made it explainable through reasons and risks.
+- threshold behavior
+- fallback exclusion
+- scan counting semantics
+- pipeline-level rescan behavior
 
-### 8. Improved review quality
+The main gap is not the scan path. It is the briefing contract drift:
 
-You made review actionable by surfacing:
+- the working tree contains expectations for `applyNow` and overflow behavior in [`tests/briefing.test.ts:273`](/Users/anishpav/Anish_Personal_projects/my-service/tests/briefing.test.ts#L273)
+- but the production assembler does not yet implement that contract end-to-end
 
-- reasons
-- risks
-- skills
-- next actions
+That mismatch is exactly the kind of thing that turns into confusing product behavior later.
 
-### 9. Added deeper workflow state
+## Recommended Next Steps
 
-You expanded application states far beyond "applied" and gave the system a meaningful workflow model.
+1. Choose one briefing artifact model and finish it.
 
-### 10. Added durable history
+- Either keep Google Docs as the canonical artifact and make `briefing` produce docs again.
+- Or make email the canonical artifact and delete or repurpose `notify`, `briefing-docs.json`, and the doc-tracking path.
 
-You made workflow history durable through an event table, which is one of the most important maturity upgrades in the repo.
+2. Finish or remove the richer briefing contract.
 
-### 11. Added follow-up management
+- If `applyNow` and overflow rows are intended to ship, implement them fully in [`assembleBriefingData()`](/Users/anishpav/Anish_Personal_projects/my-service/src/commands/briefing.ts#L190), the email renderer, and the summary helpers.
+- If they are not intended to ship yet, remove the half-extended type and test expectations until the feature is ready.
 
-You made follow-ups updateable and persistent, which reflects real job-hunt behavior rather than static tracking.
+3. Centralize “visible role count” logic.
 
-### 12. Added manual import
+- Add one helper that counts only real visible roles and reuse it for SMS summaries, email subjects, and any future headers.
 
-You gave the repo a path beyond YC-only usage by supporting CSV and JSON role import.
+4. Compute scan metrics from scans, not cumulative identities.
 
-### 13. Added draft persistence
+- `sourcesScanned` should come from the latest scan run or a clear provider count, not `job_sources`.
 
-You made drafts durable, variant-aware, and tied them into application context.
+5. Narrow the profile error handling.
 
-### 14. Added outcome tracking
-
-You captured replies, interviews, rejections, and contact timing so the repo can learn from real results.
-
-### 15. Added analytics
-
-You introduced funnel and breakdown metrics so the system can quantify what is and is not working.
-
-### 16. Added a daily operating surface
-
-You implemented `today` / `next`, which is probably the highest-leverage UX feature in the repo because it answers the user’s daily question:
-
-- "What should I do now?"
-
-### 17. Added strong regression protection
-
-You built out a test suite that now covers:
-
-- DB behavior
-- migrations
-- scanning
-- review
-- draft persistence
-- apply flow
-- follow-ups
-- import validation
-- analytics
-- daily action ranking
-- profile extraction
-
-That is a very healthy sign for an MVP.
-
----
-
-## Current Strengths
-
-### Clear product identity
-
-The repo has a clear purpose now. That alone is a huge improvement over a mixed experiment.
-
-### Good architecture for the current stage
-
-The folder structure, persistence model, and command boundaries are all sensible.
-
-### Durable local state
-
-SQLite is the right choice here.
-
-### Explainable scoring
-
-The ranking system is understandable and tunable.
-
-### Real workflow support
-
-This is not just discovery; it supports actual application execution.
-
-### Good operational ergonomics
-
-The `today`/`next` command is especially strong.
-
-### Migration awareness
-
-Schema evolution is being handled responsibly.
-
-### Strong tests
-
-The repo is protected against regression much better than most personal tools at this stage.
-
----
-
-## Current Weak Spots
-
-### Source quality is still a limiting factor
-
-YC data may still be company-heavy rather than richly role-heavy, which means role-level detail can be sparse depending on upstream data quality.
-
-### Drafting is still template-driven
-
-Draft generation is useful, but it is still fundamentally a templated drafting system rather than a richer context-aware writing assistant.
-
-### Analytics are descriptive, not yet prescriptive
-
-The system can show funnel and breakdowns, but it does not yet use historical outcomes to adapt scoring weights automatically.
-
-### One-application-per-job remains a simplifying assumption
-
-That is fine for MVP, but it could become limiting if you want multiple attempts, multiple channels, or richer contact workflows.
-
-### Review and daily workflows are still plain-text CLI
-
-This is intentional, but there is still room to improve information density and ergonomics inside the terminal.
-
-### No outbound action integrations
-
-The system tracks and drafts work, but it does not actually send email, submit applications, or log browser-side activity.
-
----
-
-## Current Risks
-
-### Risk 1: data-source sparsity
-
-If upstream sources do not provide role-level detail consistently, ranking quality may depend heavily on fallback normalization.
-
-### Risk 2: heuristic drift
-
-Scoring is still hand-tuned. If your target roles change, the config will need tuning to keep rankings sharp.
-
-### Risk 3: event/history depth may become a bottleneck
-
-As the workflow gets richer, application history may need stronger querying and reporting patterns.
-
-### Risk 4: CLI discoverability
-
-As commands and flags grow, onboarding and command discoverability become more important.
-
-These are manageable risks, not red flags.
-
----
-
-## What Is Already Good Enough To Use Daily
-
-The repo is already strong enough for daily use in the following loop:
-
-- maintain profile
-- scan or import roles
-- review top opportunities
-- draft outreach
-- mark progress
-- manage follow-ups
-- check daily queue
-- inspect stats weekly
-
-That is a complete working MVP loop.
-
----
-
-## What Would Likely Be The Next High-Leverage Upgrades
-
-This section is not a request to implement anything now. It is a strategic audit view of likely next leverage.
-
-### P0: workflow ergonomics
-
-- add command help polish and examples
-- add more explicit shortlist/hide/archive commands
-- improve query ergonomics for finding exact roles quickly
-
-### P1: better learning loop
-
-- make analytics feed back into scoring tuning
-- add source and score cohort outcome comparisons
-- add notes or reasoning on why applications were pursued
-
-### P1: richer manual curation
-
-- add company blacklist
-- add hide / snooze
-- add resume-to-role matching notes
-- add explicit "not interested" state
-
-### P2: outbound integrations
-
-- email export helpers
-- application link openers
-- richer draft templates
-- browser-side helpers
-
-### P2: more sources
-
-- careers page import
-- lightweight scraping adapters
-- source-specific importers
-
----
+- Swallow `ENOENT` if the profile is optional.
+- Surface malformed JSON and schema failures so personalization bugs are obvious.
 
 ## Bottom Line
 
-This repo has evolved into a real CLI-first job-hunt operating system MVP.
+The scan quality and score calibration work is good. It is compact, test-backed, and improves operability.
 
-It currently supports:
+The repo’s current risk is not scan correctness. It is briefing product drift. Right now the codebase has partially overlapping Google Docs, Gmail email, and notification flows, and the shared briefing data contract is ahead of what the assembler actually produces.
 
-- profile extraction
-- role ingestion
-- role normalization
-- configurable scoring
-- ranked review
-- risk-aware recommendations
-- draft persistence
-- application workflow
-- event history
-- follow-up tracking
-- outcome tracking
-- analytics
-- daily action prioritization
-
-The most important accomplishment is not any single command. It is that the repo now has a coherent operating model.
-
-Instead of a bag of scripts, it is now a structured local system for running a job search.
-
-That is the central success of the project so far.
+If the briefing path is normalized behind one clear artifact model, the rest of the system remains in strong shape for a local-first job-search OS.
