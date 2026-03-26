@@ -107,15 +107,17 @@ describe("scan command", () => {
 
     expect(result.activeSources).toBe(3);
     expect(result.upserted).toBe(3);
+    expect(result.newCount).toBe(3);
+    expect(result.updatedCount).toBe(0);
     expect(result.roleCount).toBe(3);
     expect(jobs).toHaveLength(3);
     expect(jobs.some((job) => job.company_name === "InfraCo")).toBe(true);
     expect(jobs.some((job) => job.company_name === "Anthropic")).toBe(true);
     expect(jobs.some((job) => job.company_name === "Cloudflare")).toBe(true);
     expect(scans.map((scan) => scan.provider)).toEqual(["yc", "greenhouse", "lever"]);
-    expect(JSON.parse(scans[0].source_counts_json)).toMatchObject({ totalRoles: 1, upserted: 1 });
-    expect(JSON.parse(scans[1].source_counts_json)).toMatchObject({ totalRoles: 1, upserted: 1 });
-    expect(JSON.parse(scans[2].source_counts_json)).toMatchObject({ totalRoles: 1, upserted: 1 });
+    expect(JSON.parse(scans[0].source_counts_json)).toMatchObject({ totalRoles: 1, upserted: 1, newCount: 1 });
+    expect(JSON.parse(scans[1].source_counts_json)).toMatchObject({ totalRoles: 1, upserted: 1, newCount: 1 });
+    expect(JSON.parse(scans[2].source_counts_json)).toMatchObject({ totalRoles: 1, upserted: 1, newCount: 1 });
   });
 
   test("continues scanning when one source fails", async () => {
@@ -177,5 +179,64 @@ describe("scan command", () => {
     expect(result.upserted).toBe(2);
     expect(jobs).toHaveLength(2);
     expect(JSON.parse(greenhouseScan.source_counts_json)).toMatchObject({ failed: true, upserted: 0 });
+  });
+
+  test("counts upserted separately from new when rescanning existing roles", async () => {
+    const deps = {
+      fetchCompanies: async () => ({
+        rawCount: 1,
+        companies: [
+          {
+            name: "InfraCo",
+            slug: "infraco",
+            small_logo_thumb_url: "",
+            website: "https://infraco.com",
+            all_locations: "Remote",
+            long_description: "Infra platform",
+            one_liner: "Cloud infra for teams",
+            team_size: 20,
+            industry: "B2B",
+            subindustry: "Infra",
+            tags: ["DevOps", "Kubernetes"],
+            top_company: false,
+            isHiring: true,
+            batch: "Winter 2025",
+            status: "Active",
+            industries: ["Infrastructure"],
+            regions: ["Remote"],
+            stage: "Growth",
+            url: "https://yc.com/infraco",
+            roles: [
+              {
+                id: "backend",
+                title: "Backend Engineer",
+                description: "Build backend systems",
+                location: "Remote",
+                remote: true,
+                apply_url: "https://infraco.com/jobs/backend",
+                seniority_hint: "Senior",
+              },
+            ],
+          },
+        ],
+      }),
+      fetchGreenhouseJobs: async () => [],
+      fetchLeverJobs: async () => [],
+    };
+
+    const first = await runScanCommand({}, deps);
+    const second = await runScanCommand({}, deps);
+    const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
+    const latestScan = db
+      .prepare(`SELECT source_counts_json FROM scans WHERE provider = 'yc' ORDER BY id DESC LIMIT 1`)
+      .get() as { source_counts_json: string };
+
+    expect(first.upserted).toBe(1);
+    expect(first.newCount).toBe(1);
+    expect(first.updatedCount).toBe(0);
+    expect(second.upserted).toBe(1);
+    expect(second.newCount).toBe(0);
+    expect(second.updatedCount).toBe(1);
+    expect(JSON.parse(latestScan.source_counts_json)).toMatchObject({ upserted: 1, newCount: 0 });
   });
 });

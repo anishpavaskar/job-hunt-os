@@ -112,11 +112,27 @@ export async function fetchLeverJobs(
   companies: LeverCompany[],
   /** Override fetch for testing */
   fetchFn: typeof globalThis.fetch = globalThis.fetch,
+  opts: {
+    audit?: (entry: {
+      slug: string;
+      companyName: string;
+      httpResult: string;
+      jobsReturned: number;
+    }) => void;
+  } = {},
 ): Promise<NormalizedOpportunity[]> {
   const allJobs: NormalizedOpportunity[] = [];
 
   for (let i = 0; i < companies.length; i++) {
     const company = companies[i];
+    const reportAudit = (httpResult: string, jobsReturned: number) => {
+      opts.audit?.({
+        slug: company.slug,
+        companyName: company.name,
+        httpResult,
+        jobsReturned,
+      });
+    };
 
     // Rate limiting: 500ms between requests (skip before first)
     if (i > 0) await sleep(500);
@@ -127,11 +143,13 @@ export async function fetchLeverJobs(
       response = await fetchFn(url);
     } catch (err) {
       console.warn(`[lever] Failed to fetch ${company.name} (${url}): ${err}`);
+      reportAudit("network_error", 0);
       continue;
     }
 
     if (!response.ok) {
       console.warn(`[lever] HTTP ${response.status} for ${company.name} (${url})`);
+      reportAudit(`HTTP ${response.status}`, 0);
       continue;
     }
 
@@ -140,14 +158,17 @@ export async function fetchLeverJobs(
       payload = await response.json();
     } catch {
       console.warn(`[lever] Invalid JSON from ${company.name}`);
+      reportAudit(`HTTP ${response.status} invalid_json`, 0);
       continue;
     }
 
     if (!Array.isArray(payload)) {
       console.warn(`[lever] Expected array from ${company.name}, got ${typeof payload}`);
+      reportAudit(`HTTP ${response.status} invalid_shape`, 0);
       continue;
     }
 
+    let jobsReturned = 0;
     for (const rawPosting of payload) {
       const result = leverPostingSchema.safeParse(rawPosting);
       if (!result.success) {
@@ -155,7 +176,9 @@ export async function fetchLeverJobs(
         continue;
       }
       allJobs.push(normalizeLeverPosting(company, result.data));
+      jobsReturned += 1;
     }
+    reportAudit(`HTTP ${response.status}`, jobsReturned);
   }
 
   return allJobs;

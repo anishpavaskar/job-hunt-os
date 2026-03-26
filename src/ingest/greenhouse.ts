@@ -105,15 +105,33 @@ export interface FetchGreenhouseResult {
   skipped: number;
 }
 
+export interface GreenhouseSlugAuditEntry {
+  slug: string;
+  companyName: string;
+  httpResult: string;
+  jobsReturned: number;
+}
+
 export async function fetchGreenhouseJobs(
   companies: GreenhouseCompany[],
   /** Override fetch for testing */
   fetchFn: typeof globalThis.fetch = globalThis.fetch,
+  opts: {
+    audit?: (entry: GreenhouseSlugAuditEntry) => void;
+  } = {},
 ): Promise<NormalizedOpportunity[]> {
   const allJobs: NormalizedOpportunity[] = [];
 
   for (let i = 0; i < companies.length; i++) {
     const company = companies[i];
+    const reportAudit = (httpResult: string, jobsReturned: number) => {
+      opts.audit?.({
+        slug: company.slug,
+        companyName: company.name,
+        httpResult,
+        jobsReturned,
+      });
+    };
 
     // Rate limiting: 500ms between requests (skip before first)
     if (i > 0) await sleep(500);
@@ -124,11 +142,13 @@ export async function fetchGreenhouseJobs(
       response = await fetchFn(url);
     } catch (err) {
       console.warn(`[greenhouse] Failed to fetch ${company.name} (${url}): ${err}`);
+      reportAudit("network_error", 0);
       continue;
     }
 
     if (!response.ok) {
       console.warn(`[greenhouse] HTTP ${response.status} for ${company.name} (${url})`);
+      reportAudit(`HTTP ${response.status}`, 0);
       continue;
     }
 
@@ -137,15 +157,18 @@ export async function fetchGreenhouseJobs(
       payload = await response.json();
     } catch {
       console.warn(`[greenhouse] Invalid JSON from ${company.name}`);
+      reportAudit(`HTTP ${response.status} invalid_json`, 0);
       continue;
     }
 
     const listResult = greenhouseListResponseSchema.safeParse(payload);
     if (!listResult.success) {
       console.warn(`[greenhouse] Unexpected response shape for ${company.name}`);
+      reportAudit(`HTTP ${response.status} invalid_shape`, 0);
       continue;
     }
 
+    let jobsReturned = 0;
     for (const rawJob of listResult.data.jobs) {
       const jobResult = greenhouseJobSchema.safeParse(rawJob);
       if (!jobResult.success) {
@@ -153,7 +176,9 @@ export async function fetchGreenhouseJobs(
         continue;
       }
       allJobs.push(normalizeGreenhouseJob(company, jobResult.data));
+      jobsReturned += 1;
     }
+    reportAudit(`HTTP ${response.status}`, jobsReturned);
   }
 
   return allJobs;

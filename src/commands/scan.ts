@@ -19,9 +19,16 @@ import {
 import { fetchGreenhouseJobs } from "../ingest/greenhouse";
 import { fetchLeverJobs } from "../ingest/lever";
 import { fetchYcCompanies, FetchCompaniesResult, ycRoleSchema, YcCompany } from "../ingest/yc";
-import { scoreOpportunity, sortCompanies } from "../score/scorer";
+import { getOpportunityScoreDebug, scoreOpportunity, sortCompanies } from "../score/scorer";
 
 export type ScanSource = "all" | "yc" | "greenhouse" | "lever";
+
+interface ScanOptions {
+  source?: ScanSource;
+  slugAudit?: boolean;
+  scoreDebug?: string[];
+  logger?: Pick<Console, "log">;
+}
 
 interface ProviderOpportunity {
   provider: Exclude<ScanSource, "all">;
@@ -48,6 +55,12 @@ export interface ScanDeps {
   fetchYcCompanies?: () => Promise<FetchCompaniesResult>;
   fetchGreenhouseJobs?: () => Promise<NormalizedOpportunity[]>;
   fetchLeverJobs?: () => Promise<NormalizedOpportunity[]>;
+}
+
+interface ScoredProviderOpportunity {
+  item: ProviderOpportunity;
+  scoring: ReturnType<typeof scoreOpportunity>;
+  isNew: boolean;
 }
 
 function uniqueByExternalKey(items: ProviderOpportunity[]): ProviderOpportunity[] {
@@ -175,13 +188,14 @@ async function collectExternalOpportunities(
 }
 
 export async function runScanCommand(
-  optsOrDeps: { source?: ScanSource } | ScanDeps = {},
+  optsOrDeps: ScanOptions | ScanDeps = {},
   depsArg: ScanDeps = {},
 ): Promise<{
   activeSources: number;
   rawCount: number;
   validCount: number;
   upserted: number;
+  updatedCount: number;
   roleCount: number;
   newCount: number;
   scored80Plus: number;
@@ -190,13 +204,15 @@ export async function runScanCommand(
   const deps = ("fetchCompanies" in optsOrDeps || "fetchYcCompanies" in optsOrDeps || "fetchGreenhouseJobs" in optsOrDeps || "fetchLeverJobs" in optsOrDeps)
     ? optsOrDeps as ScanDeps
     : depsArg;
-  const opts = ("source" in optsOrDeps && typeof optsOrDeps.source === "string")
-    ? optsOrDeps as { source?: ScanSource }
+  const opts = ("source" in optsOrDeps || "slugAudit" in optsOrDeps || "scoreDebug" in optsOrDeps || "logger" in optsOrDeps)
+    ? optsOrDeps as ScanOptions
     : {};
   const db = initDb();
   const startedAt = new Date().toISOString();
   const profile = loadProfile();
   const selectedSource = opts.source ?? "all";
+  const logger = opts.logger ?? console;
+  const scoreDebugSelectors = opts.scoreDebug ?? [];
   const activeSources = selectedSource === "all"
     ? (["yc", "greenhouse", "lever"] as Array<Exclude<ScanSource, "all">>)
     : [selectedSource];
@@ -233,7 +249,17 @@ export async function runScanCommand(
       }
 
       if (provider === "greenhouse") {
-        const fetchJobs = deps.fetchGreenhouseJobs ?? (() => fetchGreenhouseJobs(GREENHOUSE_COMPANIES));
+        const fetchJobs = deps.fetchGreenhouseJobs ?? (() => fetchGreenhouseJobs(
+          GREENHOUSE_COMPANIES,
+          globalThis.fetch,
+          opts.slugAudit
+            ? {
+              audit: ({ slug, httpResult, jobsReturned }) => {
+                logger.log(`[slug-audit][greenhouse] configured_slug=${slug} http=${httpResult} jobs=${jobsReturned}`);
+              },
+            }
+            : {},
+        ));
         const result = await collectExternalOpportunities(
           "greenhouse",
           await fetchJobs(),
@@ -254,7 +280,17 @@ export async function runScanCommand(
         continue;
       }
 
-      const fetchJobs = deps.fetchLeverJobs ?? (() => fetchLeverJobs(LEVER_COMPANIES));
+      const fetchJobs = deps.fetchLeverJobs ?? (() => fetchLeverJobs(
+        LEVER_COMPANIES,
+        globalThis.fetch,
+        opts.slugAudit
+          ? {
+            audit: ({ slug, httpResult, jobsReturned }) => {
+              logger.log(`[slug-audit][lever] configured_slug=${slug} http=${httpResult} jobs=${jobsReturned}`);
+            },
+          }
+          : {},
+      ));
       const result = await collectExternalOpportunities(
         "lever",
         await fetchJobs(),
@@ -298,33 +334,40 @@ export async function runScanCommand(
     combined.map((item) => item.opportunity.externalKey),
   );
 
-  let upserted = 0;
-  let newCount = 0;
-  let scored80Plus = 0;
-  let roleCount = 0;
+  const scoredItems: ScoredProviderOpportunity[] = combined.map((item) => ({
+    item,
+    scoring: scoreOpportunity(item.company, item.opportunity, profile),
+    isNew: !existingKeys.has(item.opportunity.externalKey),
+  }));
 
-  const transaction = db.transaction((items: ProviderOpportunity[]) => {
-    for (const item of items) {
+  const shouldLogScoreDebug = (item: ProviderOpportunity): boolean => {
+    if (scoreDebugSelectors.length === 0) return false;
+    const haystacks = [
+      item.company.name,
+      item.opportunity.title ?? "",
+      item.opportunity.externalKey,
+      item.sourceExternalId,
+    ].map((value) => value.toLowerCase());
+    return scoreDebugSelectors.some((selector) => haystacks.some((haystack) => haystack.includes(selector.toLowerCase())));
+  };
+
+  const transaction = db.transaction((items: ScoredProviderOpportunity[]) => {
+    for (const { item, scoring } of items) {
       const sourceId = upsertJobSource(db, {
         provider: item.provider,
         externalId: item.sourceExternalId,
         url: item.sourceUrl,
       });
 
-      const scoring = scoreOpportunity(item.company, item.opportunity, profile);
       upsertJob(db, toJobUpsertInput(item.company, item.opportunity, sourceId, scanIds[item.provider] ?? 0, scoring));
-      upserted += 1;
-      if (!existingKeys.has(item.opportunity.externalKey)) newCount += 1;
-      if (scoring.score >= 80) scored80Plus += 1;
-      if (item.opportunity.roleSource !== "company_fallback") roleCount += 1;
     }
   });
 
-  const itemsByProvider = new Map<string, ProviderOpportunity[]>();
-  combined.forEach((item) => {
-    const existing = itemsByProvider.get(item.provider) ?? [];
+  const itemsByProvider = new Map<string, ScoredProviderOpportunity[]>();
+  scoredItems.forEach((item) => {
+    const existing = itemsByProvider.get(item.item.provider) ?? [];
     existing.push(item);
-    itemsByProvider.set(item.provider, existing);
+    itemsByProvider.set(item.item.provider, existing);
   });
 
   activeSources.forEach((provider) => {
@@ -333,9 +376,8 @@ export async function runScanCommand(
     let provider80 = 0;
 
     providerItems.forEach((item) => {
-      if (!existingKeys.has(item.opportunity.externalKey)) providerNew += 1;
-      const scoring = scoreOpportunity(item.company, item.opportunity, profile);
-      if (scoring.score >= 80) provider80 += 1;
+      if (item.isNew) providerNew += 1;
+      if (item.scoring.score >= 80) provider80 += 1;
     });
 
     const counts = sourceCounts[provider];
@@ -345,7 +387,24 @@ export async function runScanCommand(
     counts.scored80Plus = provider80;
   });
 
-  transaction(combined);
+  const upserted = scoredItems.length;
+  const newCount = scoredItems.filter((item) => item.isNew).length;
+  const updatedCount = upserted - newCount;
+  const scored80Plus = scoredItems.filter((item) => item.scoring.score >= 80).length;
+  const roleCount = scoredItems.filter((item) => item.item.opportunity.roleSource !== "company_fallback").length;
+
+  scoredItems
+    .filter(({ item }) => shouldLogScoreDebug(item))
+    .forEach(({ item, scoring }) => {
+      const debug = getOpportunityScoreDebug(item.company, item.opportunity, profile);
+      logger.log(`[score-debug] ${item.company.name} | ${item.opportunity.title ?? "(General)"} | ${item.opportunity.externalKey}`);
+      logger.log(`  extracted text: ${debug.extractedText || "(empty)"}`);
+      logger.log(`  extracted skills: ${debug.extractedSkills.join(", ") || "(none)"}`);
+      logger.log(`  matched profile signals: ${JSON.stringify(debug.matchedProfileSignals)}`);
+      logger.log(`  score breakdown: ${JSON.stringify({ ...scoring.breakdown, total: scoring.score })}`);
+    });
+
+  transaction(scoredItems);
 
   for (const provider of activeSources) {
     const scanId = scanIds[provider];
@@ -365,6 +424,7 @@ export async function runScanCommand(
     rawCount: activeSources.reduce((sum, provider) => sum + (sourceCounts[provider]?.rawCount ?? 0), 0),
     validCount: activeSources.reduce((sum, provider) => sum + (sourceCounts[provider]?.validCount ?? 0), 0),
     upserted,
+    updatedCount,
     roleCount,
     newCount,
     scored80Plus,
@@ -372,19 +432,35 @@ export async function runScanCommand(
   };
 }
 
+function collectListOption(value: string, previous: string[]): string[] {
+  return previous.concat(
+    value
+      .split(",")
+      .map((part) => part.trim())
+      .filter(Boolean),
+  );
+}
+
 export function registerScanCommand(): Command {
   return new Command("scan")
     .description("Fetch jobs from YC, Greenhouse, and Lever, score them, and persist them to SQLite")
     .option("--source <source>", "yc, greenhouse, lever, or all", "all")
-    .action(async (opts: { source?: ScanSource }) => {
+    .option("--slug-audit", "print configured slug, HTTP result, and jobs returned for Greenhouse and Lever")
+    .option(
+      "--score-debug <selector>",
+      "print scoring internals for matching jobs; repeat or comma-separate values",
+      collectListOption,
+      [],
+    )
+    .action(async (opts: { source?: ScanSource; slugAudit?: boolean; scoreDebug?: string[] }) => {
       const source = (opts.source ?? "all") as ScanSource;
       if (!["all", "yc", "greenhouse", "lever"].includes(source)) {
         throw new Error(`Unsupported source "${opts.source}". Use yc, greenhouse, lever, or all.`);
       }
 
-      const result = await runScanCommand({ source });
+      const result = await runScanCommand({ source, slugAudit: opts.slugAudit, scoreDebug: opts.scoreDebug });
       console.log(
-        `Scanned ${result.activeSources} sources. ${result.upserted} total roles. ${result.newCount} new. ${result.scored80Plus} scored 80+.`,
+        `Scanned ${result.activeSources} sources. ${result.upserted} upserted. ${result.newCount} new. ${result.updatedCount} updated. ${result.scored80Plus} scored 80+.`,
       );
     });
 }

@@ -27,7 +27,13 @@ jest.mock("googleapis", () => {
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { createGmailDraft } from "../src/integrations/gmail";
+import {
+  buildBriefingNotificationBody,
+  buildBriefingNotificationSubject,
+  createBriefingNotificationDraft,
+  createGmailDraft,
+} from "../src/integrations/gmail";
+import { runNotifyCommand } from "../src/commands/notify";
 import { runDraftCommand } from "../src/commands/draft";
 import { runListDraftsCommand, runShowDraftCommand } from "../src/commands/drafts";
 import { closeDb, initDb, resetDb } from "../src/db";
@@ -60,6 +66,7 @@ describe("Gmail draft integration", () => {
       GOOGLE_CLIENT_ID: "client-id",
       GOOGLE_CLIENT_SECRET: "client-secret",
       GOOGLE_REFRESH_TOKEN: "refresh-token",
+      NOTIFY_EMAIL_TO: "anish@example.com",
       ANTHROPIC_API_KEY: "anthropic-key",
     };
 
@@ -155,5 +162,99 @@ describe("Gmail draft integration", () => {
     const detail = runShowDraftCommand(id);
     expect(detail).toContain("gmail=gmail-draft-9");
     expect(detail).toContain("Anthropic");
+  });
+
+  test("createBriefingNotificationDraft formats a self-email draft", async () => {
+    googleapisMock.__mock.draftsCreate.mockResolvedValue({ data: { id: "briefing-draft-1" } });
+
+    const body = buildBriefingNotificationBody(
+      {
+        date: "2026-03-26",
+        newRoles: [
+          {
+            rank: 1,
+            score: 92,
+            company: "Anthropic",
+            role: "Software Engineer",
+            location: "San Francisco, CA",
+            whyItFits: "Strong backend/platform fit",
+            topRisk: null,
+            applyLink: "https://example.com/jobs/1",
+            isProspect: true,
+          },
+        ],
+        followups: [],
+        drafts: [],
+        funnel: null,
+      },
+      "https://docs.google.com/document/d/doc123/edit",
+    );
+
+    expect(buildBriefingNotificationSubject({ date: "2026-03-26" })).toBe("Daily Job Hunt Briefing — 2026-03-26");
+    expect(body).toContain("New roles: 1");
+    expect(body).toContain("Top score: 92");
+    expect(body).toContain("Doc: https://docs.google.com/document/d/doc123/edit");
+    expect(body).toContain("1. Anthropic — Software Engineer [92]");
+
+    const draftId = await createBriefingNotificationDraft(
+      {
+        date: "2026-03-26",
+        newRoles: [
+          {
+            rank: 1,
+            score: 92,
+            company: "Anthropic",
+            role: "Software Engineer",
+            location: "San Francisco, CA",
+            whyItFits: "Strong backend/platform fit",
+            topRisk: null,
+            applyLink: "https://example.com/jobs/1",
+            isProspect: true,
+          },
+        ],
+        followups: [],
+        drafts: [],
+        funnel: null,
+      },
+      "https://docs.google.com/document/d/doc123/edit",
+    );
+
+    expect(draftId).toBe("briefing-draft-1");
+    const call = googleapisMock.__mock.draftsCreate.mock.calls[0][0];
+    const decoded = decodeRaw(call.requestBody.message.raw);
+    expect(decoded).toContain("To: anish@example.com");
+    expect(decoded).toContain("Subject: Daily Job Hunt Briefing — 2026-03-26");
+  });
+
+  test("notify creates a Gmail draft for the latest briefing", async () => {
+    googleapisMock.__mock.draftsCreate.mockResolvedValue({ data: { id: "notify-draft-1" } });
+
+    fs.writeFileSync(
+      path.join(tmpDir, "data", "briefing-docs.json"),
+      JSON.stringify({ "2026-03-26": "doc123" }, null, 2),
+    );
+    const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
+    db.prepare(`UPDATE jobs SET created_at = ?, updated_at = ?`).run("2026-03-26T10:00:00.000Z", "2026-03-26T10:00:00.000Z");
+
+    const result = await runNotifyCommand();
+
+    expect(result).toContain("Gmail draft created for briefing 2026-03-26");
+    const call = googleapisMock.__mock.draftsCreate.mock.calls.at(-1)?.[0];
+    const decoded = decodeRaw(call.requestBody.message.raw);
+    expect(decoded).toContain("To: anish@example.com");
+    expect(decoded).toContain("Doc: https://docs.google.com/document/d/doc123/edit");
+  });
+
+  test("notify skips cleanly when NOTIFY_EMAIL_TO is missing", async () => {
+    delete process.env.NOTIFY_EMAIL_TO;
+    fs.writeFileSync(
+      path.join(tmpDir, "data", "briefing-docs.json"),
+      JSON.stringify({ "2026-03-26": "doc123" }, null, 2),
+    );
+
+    const result = await runNotifyCommand();
+
+    expect(result).toBe("Gmail notification skipped: NOTIFY_EMAIL_TO not configured");
+    expect(googleapisMock.__mock.draftsCreate).not.toHaveBeenCalled();
   });
 });

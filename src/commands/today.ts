@@ -115,12 +115,12 @@ function buildWhyItsAMatch(action: NextActionRecord, profile?: Profile): string[
   return fallbackBullets;
 }
 
-export function runTodayCommand(opts: { limit?: string } = {}): string[] {
+export function runTodayCommand(opts: { limit?: string; includeFallback?: boolean } = {}): string[] {
   const db = initDb();
   const profile = loadProfile();
   const parsedLimit = parseInt(opts.limit ?? "10", 10);
   const limit = Number.isFinite(parsedLimit) ? parsedLimit : 10;
-  const actions = listNextActions(db, limit);
+  const actions = listNextActions(db, limit, { includeFallback: opts.includeFallback });
 
   return actions.map((action, index) => {
     const title = action.title ? ` - ${action.title}` : "";
@@ -149,7 +149,8 @@ export function registerTodayCommand(): Command {
     .alias("next")
     .description("Show the best actions to take right now across jobs, drafts, and follow-ups")
     .option("--limit <number>", "max actions to show", "10")
-    .action((opts: { limit?: string }) => {
+    .option("--include-fallback", "include company-level fallback records")
+    .action((opts: { limit?: string; includeFallback?: boolean }) => {
       const lines = runTodayCommand(opts);
       if (lines.length === 0) {
         console.log("No high-priority actions right now.");

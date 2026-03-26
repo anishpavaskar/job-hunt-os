@@ -313,4 +313,49 @@ describe("today command", () => {
     expect(lines[deepFitIndex]).toContain("Matched skills:");
     expect(lines[softSignalIndex]).toContain("Aligned preferences:");
   });
+
+  test("excludes company fallback roles by default and can include them explicitly", () => {
+    const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
+    const scanId = createScan(db, "manual", new Date().toISOString());
+    const fallbackSourceId = upsertJobSource(db, {
+      provider: "manual",
+      externalId: "fallback-source",
+      url: "https://example.com/fallback",
+    });
+
+    upsertJob(db, {
+      sourceId: fallbackSourceId,
+      scanId,
+      externalKey: "company:fallback-co",
+      roleExternalId: null,
+      roleSource: "company_fallback",
+      companyName: "FallbackCo",
+      title: null,
+      summary: "General company page for a strong startup",
+      website: "https://fallbackco.com",
+      locations: "Remote",
+      remoteFlag: true,
+      jobUrl: "https://example.com/fallback",
+      regions: ["Remote"],
+      tags: ["Infrastructure"],
+      industries: ["Software"],
+      stage: "Growth",
+      batch: "Imported",
+      extractedSkills: ["AWS"],
+      topCompany: true,
+      isHiring: true,
+      score: 95,
+      scoreReasons: ["company_signal:20"],
+      scoreBreakdown: { roleFit: 16, stackFit: 18, seniorityFit: 12, freshness: 10, companySignal: 20 },
+      explanationBullets: ["Stack aligns well with your core skills"],
+      riskBullets: ["Role details are missing"],
+      status: "shortlisted",
+    });
+
+    const defaultLines = runTodayCommand({ limit: "10" });
+    const includeFallbackLines = runTodayCommand({ limit: "10", includeFallback: true });
+
+    expect(defaultLines.join("\n")).not.toContain("FallbackCo");
+    expect(includeFallbackLines.join("\n")).toContain("FallbackCo");
+  });
 });

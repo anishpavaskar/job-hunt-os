@@ -550,7 +550,9 @@ function scoreApplyAction(job: JobRecord, breakdown: NextActionRecord["scoreBrea
 export function listNextActions(
   db: Database.Database,
   limit = 10,
+  opts: { includeFallback?: boolean } = {},
 ): NextActionRecord[] {
+  const fallbackClause = opts.includeFallback ? "" : `AND jobs.role_source != 'company_fallback'`;
   const dueFollowups = db
     .prepare(
       `SELECT
@@ -576,6 +578,7 @@ export function listNextActions(
        FROM followups
        JOIN jobs ON jobs.id = followups.job_id
        WHERE followups.status = 'pending'
+         ${fallbackClause}
        ORDER BY followups.due_at ASC, jobs.score DESC`,
     )
     .all() as Array<{
@@ -625,6 +628,7 @@ export function listNextActions(
        JOIN jobs ON jobs.id = applications.job_id
        LEFT JOIN drafts ON drafts.application_id = applications.id OR drafts.job_id = jobs.id
        WHERE applications.status = 'drafted'
+         ${fallbackClause}
        GROUP BY applications.id
        ORDER BY draft_updated_at DESC, jobs.score DESC`,
     )
@@ -671,6 +675,7 @@ export function listNextActions(
        FROM jobs
        LEFT JOIN applications ON applications.job_id = jobs.id
        WHERE jobs.status IN ('new', 'reviewed', 'saved', 'shortlisted')
+         ${fallbackClause}
          AND (applications.id IS NULL OR applications.status IN ('saved', 'shortlisted'))
          AND NOT EXISTS (
            SELECT 1

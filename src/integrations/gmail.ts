@@ -1,5 +1,6 @@
 import { google } from "googleapis";
 import { getGoogleAuth } from "./google-docs";
+import type { BriefingData } from "./google-docs";
 
 function encodeBase64Url(value: string): string {
   return Buffer.from(value, "utf-8")
@@ -39,4 +40,54 @@ export async function createGmailDraft(
     throw new Error("Gmail draft creation returned no draft ID");
   }
   return draftId;
+}
+
+export function getNotifyEmailRecipient(): string | null {
+  return process.env.NOTIFY_EMAIL_TO ?? null;
+}
+
+export function buildBriefingNotificationSubject(data: Pick<BriefingData, "date">): string {
+  return `Daily Job Hunt Briefing — ${data.date}`;
+}
+
+export function buildBriefingNotificationBody(
+  data: BriefingData,
+  docUrl: string,
+): string {
+  const topRoles = data.newRoles
+    .slice(0, 3)
+    .map((role, index) => `${index + 1}. ${role.company} — ${role.role} [${role.score}]`)
+    .join("\n");
+
+  const lines = [
+    `Daily job hunt briefing for ${data.date}`,
+    "",
+    `New roles: ${data.newRoles.length}`,
+    `Top score: ${data.newRoles[0]?.score ?? 0}`,
+    `Pending follow-ups: ${data.followups.length}`,
+    `Unsent drafts: ${data.drafts.length}`,
+    `Doc: ${docUrl}`,
+  ];
+
+  if (topRoles) {
+    lines.push("", "Top roles:", topRoles);
+  }
+
+  return lines.join("\n");
+}
+
+export async function createBriefingNotificationDraft(
+  data: BriefingData,
+  docUrl: string,
+  to = getNotifyEmailRecipient(),
+): Promise<string> {
+  if (!to) {
+    throw new Error("NOTIFY_EMAIL_TO not set");
+  }
+
+  return createGmailDraft(
+    to,
+    buildBriefingNotificationSubject(data),
+    buildBriefingNotificationBody(data, docUrl),
+  );
 }

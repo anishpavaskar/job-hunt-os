@@ -15,10 +15,12 @@ import type {
   BriefingFunnel,
 } from "../integrations/google-docs";
 import { createOrUpdateBriefingDoc } from "../integrations/google-docs";
-import { isTwilioConfigured, sendDailyBriefingSMS } from "../integrations/twilio";
+import { createBriefingNotificationDraft } from "../integrations/gmail";
 import type { JobRecord } from "../db/types";
 
 // ─── Data assembly (exported for testing) ──────────────────────
+
+export const DEFAULT_BRIEFING_MIN_SCORE = 50;
 
 function todayISO(): string {
   return new Date().toISOString().slice(0, 10);
@@ -50,20 +52,25 @@ export function assembleNewRoles(
   db: Database.Database,
   prospectNames: Set<string>,
   dateStr?: string,
+  opts: { includeFallback?: boolean; minScore?: number } = {},
 ): BriefingNewRole[] {
   const { startIso, endIso } = getDateWindow(dateStr);
+  const includeFallback = opts.includeFallback ?? false;
+  const minScore = opts.minScore ?? DEFAULT_BRIEFING_MIN_SCORE;
+  const fallbackClause = includeFallback ? "" : `AND jobs.role_source != 'company_fallback'`;
   const rows = db
     .prepare(
       `SELECT jobs.*, job_sources.external_id, job_sources.url AS source_url
        FROM jobs
        JOIN job_sources ON job_sources.id = jobs.source_id
-       WHERE jobs.score >= 60
+       WHERE jobs.score >= ?
          AND jobs.created_at >= ?
          AND jobs.created_at <= ?
+         ${fallbackClause}
        ORDER BY jobs.score DESC, jobs.company_name ASC
        LIMIT 50`,
     )
-    .all(startIso, endIso) as JobRecord[];
+    .all(minScore, startIso, endIso) as JobRecord[];
 
   return rows.map((row, i) => {
     const explanations: string[] = JSON.parse(row.explanation_bullets_json);
@@ -158,6 +165,7 @@ export function assembleWeeklyFunnel(db: Database.Database): BriefingFunnel {
 export function assembleBriefingData(
   db: Database.Database,
   dateOverride?: string,
+  opts: { includeFallback?: boolean; minScore?: number } = {},
 ): BriefingData {
   const date = dateOverride ?? todayISO();
   const prospectCompanies = loadProspectCompanies();
@@ -165,7 +173,7 @@ export function assembleBriefingData(
 
   return {
     date,
-    newRoles: assembleNewRoles(db, prospectNames, date),
+    newRoles: assembleNewRoles(db, prospectNames, date, opts),
     followups: assembleFollowups(db),
     drafts: assembleDrafts(db),
     funnel: isMonday(date) ? assembleWeeklyFunnel(db) : null,
@@ -179,6 +187,22 @@ export function getBriefingSmsSummary(data: BriefingData): { newRoleCount: numbe
   };
 }
 
+export async function createBriefingNotification(
+  data: BriefingData,
+  docUrl: string,
+): Promise<string> {
+  try {
+    const draftId = await createBriefingNotificationDraft(data, docUrl);
+    return `Gmail notification draft created: ${draftId}`;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.includes("NOTIFY_EMAIL_TO")) {
+      return "Gmail notification skipped: NOTIFY_EMAIL_TO not configured";
+    }
+    return `Gmail notification failed: ${message}`;
+  }
+}
+
 // ─── CLI command ───────────────────────────────────────────────
 
 export function registerBriefingCommand(): Command {
@@ -186,7 +210,8 @@ export function registerBriefingCommand(): Command {
     .description("Generate a Google Doc with today's job hunt briefing")
     .option("--no-scan", "Skip scanning sources before generating briefing")
     .option("--date <date>", "Override the briefing date (YYYY-MM-DD)")
-    .action(async (opts: { scan?: boolean; date?: string }) => {
+    .option("--include-fallback", "include company-level fallback records in briefing new roles")
+    .action(async (opts: { scan?: boolean; date?: string; includeFallback?: boolean }) => {
       // Run scan first unless --no-scan
       if (opts.scan !== false) {
         console.log("[briefing] Scanning all sources...");
@@ -194,7 +219,7 @@ export function registerBriefingCommand(): Command {
           const { runScanCommand } = await import("./scan");
           const scanResult = await runScanCommand();
           console.log(
-            `[briefing] Scan done. Upserted ${scanResult.upserted} roles.`,
+            `[briefing] Scan done. Upserted ${scanResult.upserted} roles (${scanResult.newCount} new).`,
           );
         } catch (err) {
           console.warn(
@@ -204,10 +229,10 @@ export function registerBriefingCommand(): Command {
       }
 
       const db = initDb();
-      const data = assembleBriefingData(db, opts.date);
+      const data = assembleBriefingData(db, opts.date, { includeFallback: opts.includeFallback });
 
       console.log(`[briefing] Assembling briefing for ${data.date}`);
-      console.log(`  New roles (60+): ${data.newRoles.length}`);
+      console.log(`  New roles (${DEFAULT_BRIEFING_MIN_SCORE}+, ${opts.includeFallback ? "including fallback" : "real roles only"}): ${data.newRoles.length}`);
       console.log(`  Pending follow-ups: ${data.followups.length}`);
       console.log(`  Unsent drafts: ${data.drafts.length}`);
       if (data.funnel) {
@@ -217,17 +242,11 @@ export function registerBriefingCommand(): Command {
       try {
         const docUrl = await createOrUpdateBriefingDoc(data);
         console.log(`\n[briefing] Doc ready: ${docUrl}`);
-
-        if (isTwilioConfigured()) {
-          try {
-            const { newRoleCount, topScore } = getBriefingSmsSummary(data);
-            await sendDailyBriefingSMS(docUrl, newRoleCount, topScore);
-            console.log("[briefing] SMS sent.");
-          } catch (err) {
-            console.warn(`[briefing] SMS failed: ${err instanceof Error ? err.message : String(err)}`);
-          }
+        const notificationMessage = await createBriefingNotification(data, docUrl);
+        if (notificationMessage.includes("failed")) {
+          console.warn(`[briefing] ${notificationMessage}`);
         } else {
-          console.log("[briefing] SMS skipped: Twilio not configured");
+          console.log(`[briefing] ${notificationMessage}`);
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);

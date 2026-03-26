@@ -32,8 +32,31 @@ function normalizeText(...parts: Array<string | null | undefined>): string {
   return parts.filter(Boolean).join(" ").toLowerCase();
 }
 
+function collapseWhitespace(...parts: Array<string | null | undefined>): string {
+  return parts
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function matchCount(text: string, values: readonly string[]): number {
   return values.filter((value) => containsCI(text, value)).length;
+}
+
+function collectMatches(text: string, values: readonly string[]): string[] {
+  return [...new Set(values.filter((value) => containsCI(text, value)))];
+}
+
+function buildOpportunityText(company: YcCompany, opportunity: NormalizedOpportunity): string {
+  return collapseWhitespace(
+    opportunity.title,
+    opportunity.summary,
+    company.one_liner,
+    company.long_description,
+    company.tags.join(" "),
+    company.industries.join(" "),
+  );
 }
 
 function scoreLocation(company: YcCompany): number {
@@ -83,14 +106,7 @@ function scoreCompanySignal(company: YcCompany, opportunity: NormalizedOpportuni
 }
 
 function scoreStackFit(company: YcCompany, opportunity: NormalizedOpportunity, profile?: Profile): number {
-  const text = normalizeText(
-    opportunity.title,
-    opportunity.summary,
-    company.one_liner,
-    company.long_description,
-    company.tags.join(" "),
-    company.industries.join(" "),
-  );
+  const text = buildOpportunityText(company, opportunity).toLowerCase();
   const tier1 = profile?.skills_tier1 ?? TIER1_TAGS;
   const tier2 = profile?.skills_tier2 ?? TIER2_TAGS;
   const domains = profile?.domains ?? [];
@@ -189,21 +205,13 @@ function buildRiskBullets(
   return risks.slice(0, 2);
 }
 
-export interface OpportunityScore {
-  score: number;
-  reasons: string[];
-  breakdown: ScoreBreakdown;
-  explanationBullets: string[];
-  riskBullets: string[];
-}
-
-export function scoreOpportunity(
+function buildBreakdown(
   company: YcCompany,
   opportunity: NormalizedOpportunity,
   profile?: Profile,
-): OpportunityScore {
+): ScoreBreakdown {
   const prospectListed = isProspectCompany(company.name);
-  const breakdown: ScoreBreakdown = {
+  return {
     roleFit: scoreRoleFit(opportunity, profile),
     stackFit: scoreStackFit(company, opportunity, profile),
     seniorityFit: scoreSeniorityFit(opportunity, profile),
@@ -216,6 +224,103 @@ export function scoreOpportunity(
     ),
     prospect_listed: prospectListed,
   };
+}
+
+function collectPreferenceSignals(company: YcCompany, opportunity: NormalizedOpportunity, profile?: Profile): string[] {
+  if (!profile?.preferences) return [];
+
+  const signals: string[] = [];
+  const companyLocation = `${company.all_locations} ${company.regions.join(" ")}`.toLowerCase();
+  const text = normalizeText(
+    opportunity.title,
+    opportunity.summary,
+    company.one_liner,
+    company.long_description,
+    company.tags.join(" "),
+    company.industries.join(" "),
+  );
+
+  if (profile.preferences.remote && opportunity.remoteFlag) {
+    signals.push("remote");
+  }
+  if (profile.preferences.healthcare && text.includes("health")) {
+    signals.push("healthcare");
+  }
+  if (profile.preferences.hybrid && scoreLocation(company) > 0) {
+    signals.push("hybrid");
+  }
+  if (profile.location && companyLocation.includes(profile.location.toLowerCase())) {
+    signals.push(`location:${profile.location}`);
+  } else if (profile.preferences.relocation && scoreProfileLocation(company, profile) > 0) {
+    signals.push("relocation");
+  }
+
+  return signals;
+}
+
+export interface OpportunityScore {
+  score: number;
+  reasons: string[];
+  breakdown: ScoreBreakdown;
+  explanationBullets: string[];
+  riskBullets: string[];
+}
+
+export interface OpportunityScoreDebug {
+  extractedText: string;
+  extractedSkills: string[];
+  matchedProfileSignals: Record<string, string[]>;
+  breakdown: ScoreBreakdown;
+  score: number;
+}
+
+export function getOpportunityScoreDebug(
+  company: YcCompany,
+  opportunity: NormalizedOpportunity,
+  profile?: Profile,
+): OpportunityScoreDebug {
+  const extractedText = buildOpportunityText(company, opportunity);
+  const roleText = collapseWhitespace(opportunity.title, opportunity.summary);
+  const matchedProfileSignals: Record<string, string[]> = {};
+
+  const tier1Skills = collectMatches(extractedText, profile?.skills_tier1 ?? []);
+  const tier2Skills = collectMatches(extractedText, profile?.skills_tier2 ?? []);
+  const domains = collectMatches(extractedText, profile?.domains ?? []);
+  const practices = collectMatches(extractedText, profile?.practices ?? []);
+  const targetRoles = collectMatches(roleText, profile?.target_roles ?? []);
+  const preferences = collectPreferenceSignals(company, opportunity, profile);
+
+  if (tier1Skills.length > 0) matchedProfileSignals.tier1Skills = tier1Skills;
+  if (tier2Skills.length > 0) matchedProfileSignals.tier2Skills = tier2Skills;
+  if (domains.length > 0) matchedProfileSignals.domains = domains;
+  if (practices.length > 0) matchedProfileSignals.practices = practices;
+  if (targetRoles.length > 0) matchedProfileSignals.targetRoles = targetRoles;
+  if (preferences.length > 0) matchedProfileSignals.preferences = preferences;
+
+  const breakdown = buildBreakdown(company, opportunity, profile);
+  return {
+    extractedText,
+    extractedSkills: opportunity.extractedSkills,
+    matchedProfileSignals,
+    breakdown,
+    score: clamp(
+      breakdown.roleFit
+      + breakdown.stackFit
+      + breakdown.seniorityFit
+      + breakdown.freshness
+      + breakdown.companySignal,
+      100,
+    ),
+  };
+}
+
+export function scoreOpportunity(
+  company: YcCompany,
+  opportunity: NormalizedOpportunity,
+  profile?: Profile,
+): OpportunityScore {
+  const breakdown = buildBreakdown(company, opportunity, profile);
+  const prospectListed = Boolean(breakdown.prospect_listed);
 
   const reasons = [
     `role_fit:${breakdown.roleFit}`,

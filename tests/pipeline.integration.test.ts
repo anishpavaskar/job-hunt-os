@@ -274,7 +274,7 @@ describe("[integration] pipeline end-to-end", () => {
     expect(Array.isArray(briefing.newRoles)).toBe(true);
     expect(briefing.newRoles.length).toBeGreaterThan(0);
     expect(briefing.newRoles.length).toBe(
-      jobs.filter((job) => job.score >= 60).length,
+      jobs.filter((job) => job.score >= 50 && job.role_source !== "company_fallback").length,
     );
     for (let index = 1; index < briefing.newRoles.length; index += 1) {
       expect(briefing.newRoles[index - 1].score).toBeGreaterThanOrEqual(briefing.newRoles[index].score);

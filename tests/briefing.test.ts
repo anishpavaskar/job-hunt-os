@@ -29,7 +29,8 @@ function seedJob(
   overrides: Partial<{
     externalKey: string;
     companyName: string;
-    title: string;
+    title: string | null;
+    roleSource: string;
     score: number;
     jobUrl: string;
     locations: string;
@@ -45,9 +46,9 @@ function seedJob(
     scanId,
     externalKey: key,
     roleExternalId: null,
-    roleSource: "role",
+    roleSource: overrides.roleSource ?? "role",
     companyName: overrides.companyName ?? "TestCo",
-    title: overrides.title ?? "Engineer",
+    title: overrides.title === undefined ? "Engineer" : overrides.title,
     summary: "A test role",
     website: "https://test.com",
     locations: overrides.locations ?? "San Francisco, CA",
@@ -89,25 +90,26 @@ describe("briefing data assembly", () => {
     closeDb();
   });
 
-  test("assembleNewRoles returns recent high-scoring roles sorted by score", () => {
+  test("assembleNewRoles uses the 50-point default threshold and sorts by score", () => {
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
     const sourceId = upsertJobSource(db, { provider: "test", externalId: "s1", url: "https://test.com" });
     const scanId = createScan(db, "test", new Date().toISOString());
     completeScan(db, scanId, 1, 1, new Date().toISOString());
 
     seedJob(db, sourceId, scanId, { externalKey: "t:1", companyName: "HighCo", title: "Staff SRE", score: 92 });
-    seedJob(db, sourceId, scanId, { externalKey: "t:2", companyName: "MidCo", title: "Backend Eng", score: 70 });
-    seedJob(db, sourceId, scanId, { externalKey: "t:3", companyName: "LowCo", title: "Junior Dev", score: 45 }); // below 60
+    seedJob(db, sourceId, scanId, { externalKey: "t:2", companyName: "MidCo", title: "Backend Eng", score: 55 });
+    seedJob(db, sourceId, scanId, { externalKey: "t:3", companyName: "LowCo", title: "Junior Dev", score: 49 });
 
     db.prepare(`UPDATE jobs SET created_at = ?, updated_at = ?`).run("2026-03-26T10:00:00.000Z", "2026-03-26T10:00:00.000Z");
 
     const roles = assembleNewRoles(db, new Set(), "2026-03-26");
 
-    expect(roles).toHaveLength(2); // LowCo excluded (score < 60)
+    expect(roles).toHaveLength(2);
     expect(roles[0].company).toBe("HighCo");
     expect(roles[0].score).toBe(92);
     expect(roles[0].rank).toBe(1);
     expect(roles[1].company).toBe("MidCo");
+    expect(roles[1].score).toBe(55);
     expect(roles[1].rank).toBe(2);
   });
 
@@ -242,6 +244,29 @@ describe("briefing data assembly", () => {
     expect(Array.isArray(data.drafts)).toBe(true);
     // 2026-03-26 is Thursday → no funnel
     expect(data.funnel).toBeNull();
+  });
+
+  test("assembleBriefingData excludes company fallback roles by default and can include them explicitly", () => {
+    const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
+    const sourceId = upsertJobSource(db, { provider: "test", externalId: "s1", url: "https://test.com" });
+    const scanId = createScan(db, "test", new Date().toISOString());
+
+    seedJob(db, sourceId, scanId, { externalKey: "t:real", companyName: "RealRoleCo", title: "Platform Engineer", score: 78 });
+    seedJob(db, sourceId, scanId, {
+      externalKey: "company:fallbackco",
+      companyName: "FallbackCo",
+      title: null,
+      roleSource: "company_fallback",
+      score: 91,
+      jobUrl: "https://fallback.example.com",
+    });
+    db.prepare(`UPDATE jobs SET created_at = ?, updated_at = ?`).run("2026-03-26T10:00:00.000Z", "2026-03-26T10:00:00.000Z");
+
+    const defaultData = assembleBriefingData(db, "2026-03-26");
+    const includeFallbackData = assembleBriefingData(db, "2026-03-26", { includeFallback: true });
+
+    expect(defaultData.newRoles.map((role) => role.company)).toEqual(["RealRoleCo"]);
+    expect(includeFallbackData.newRoles.map((role) => role.company)).toEqual(["FallbackCo", "RealRoleCo"]);
   });
 
   test("assembleBriefingData uses the requested date window for new roles", () => {
