@@ -1,0 +1,63 @@
+{
+  "name": "ANISH PAVASKAR",
+  "target_roles": [
+    "Software Engineer",
+    "Backend Engineer",
+    "Platform Engineer",
+    "Infrastructure Engineer",
+    "Cloud Engineer",
+    "DevOps Engineer"
+  ],
+  "skills_tier1": [
+    "Python",
+    "TypeScript",
+    "Go",
+    "Kubernetes",
+    "Docker",
+    "AWS",
+    "PostgreSQL",
+    "Node.js"
+  ],
+  "skills_tier2": [
+    "FastAPI",
+    "Terraform",
+    "JavaScript",
+    "Java",
+    "C++",
+    "Helm",
+    "Redis",
+    "MongoDB",
+    "React",
+    "Jenkins",
+    "Prometheus",
+    "Grafana",
+    "SQL",
+    "Bash",
+    "DynamoDB",
+    "S3",
+    "Lambda"
+  ],
+  "domains": [
+    "Backend Engineering",
+    "Cloud Infrastructure",
+    "DevOps",
+    "AI/ML",
+    "Healthcare"
+  ],
+  "practices": [
+    "CI/CD",
+    "Microservices",
+    "Distributed Systems",
+    "Observability",
+    "Infrastructure as Code"
+  ],
+  "years_of_experience": 3,
+  "location": "Milpitas, CA",
+  "preferences": {
+    "remote": true,
+    "hybrid": true,
+    "healthcare": true,
+    "early_stage": true,
+    "relocation": true
+  }
+}

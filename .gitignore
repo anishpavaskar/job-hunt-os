@@ -1,0 +1,14 @@
+data/yc_hiring_raw.json
+data/matches.json
+data/scan_log.json
+data/job_hunt.db
+data/outreach-batch.json
+data/outreach-batch.md
+.env
+.env.local
+node_modules
+dist
+litestream.yml
+credentials.json
+client_secret_*.json
+.DS_Store

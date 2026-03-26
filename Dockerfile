@@ -3,15 +3,19 @@ FROM node:20-alpine AS build
 
 WORKDIR /app
 
-COPY package*.json ./
+COPY package*.json tsconfig.json ./
 RUN npm ci --ignore-scripts
 
-COPY tsconfig.json ./
 COPY src/ ./src/
+COPY config/ ./config/
 RUN npm run build
 
 # ── Production stage ─────────────────────────
 FROM node:20-alpine AS production
+
+# Install litestream for SQLite replication
+RUN wget -qO- https://github.com/benbjohnson/litestream/releases/latest/download/litestream-v0.3.13-linux-amd64-static.tar.gz \
+    | tar xz -C /usr/local/bin
 
 # Security: run as non-root
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
@@ -22,15 +26,19 @@ COPY package*.json ./
 RUN npm ci --omit=dev --ignore-scripts
 
 COPY --from=build /app/dist ./dist
+COPY config/ ./config/
+COPY data/profile.json ./data/profile.json
+COPY data/prospect-companies.json ./data/prospect-companies.json
+COPY scripts/daily-pipeline.sh ./scripts/daily-pipeline.sh
+COPY scripts/start-with-litestream.sh ./scripts/start-with-litestream.sh
 
-# Security: own files as non-root
-RUN chown -R appuser:appgroup /app
+RUN chmod +x scripts/*.sh
+
+# Create writable data directory for SQLite
+RUN mkdir -p /app/data && chown -R appuser:appgroup /app
+
 USER appuser
 
-EXPOSE 3000
-
-HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:3000/healthz || exit 1
-
-ENTRYPOINT ["node"]
-CMD ["dist/index.js"]
+# No HTTP port — this is a cron worker
+# Default: run the daily briefing pipeline
+CMD ["node", "dist/src/cli.js", "briefing"]

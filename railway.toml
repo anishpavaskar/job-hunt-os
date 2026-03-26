@@ -1,0 +1,14 @@
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# No public-facing port — this is a cron worker
+numReplicas = 1
+startCommand = "scripts/start-with-litestream.sh"
+# Railway region: us-west1 (closest to Milpitas, CA)
+region = "us-west1"
+
+# Cron trigger: 7:00 AM PST = 2:00 PM UTC daily
+# Set via Railway dashboard: Settings → Cron → "0 14 * * *"
+# Or use the CRON_SCHEDULE env var
