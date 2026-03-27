@@ -288,7 +288,7 @@ function mapJobUpsertInput(input: JobUpsertInput): Record<string, unknown> {
   return row;
 }
 
-function normalizeJobRow(row: Record<string, any>): JobRecord {
+export function normalizeJobRow(row: Record<string, any>): JobRecord {
   const source = Array.isArray(row.job_sources) ? row.job_sources[0] : row.job_sources ?? {};
   return {
     id: row.id,
@@ -710,8 +710,15 @@ export async function getJobById(
   db: DbClient,
   jobId: number,
 ): Promise<JobRecord | undefined> {
-  const jobs = await fetchJobsWithSource(db);
-  return jobs.find((job) => job.id === jobId);
+  const { data, error } = await db
+    .from("jobs")
+    .select("*, job_sources!inner(provider, external_id, url)")
+    .eq("id", jobId)
+    .maybeSingle();
+  if (error) {
+    throw new Error(`get job by id: ${error.message}`);
+  }
+  return data ? normalizeJobRow(data as Record<string, any>) : undefined;
 }
 
 export async function listBrowseJobs(

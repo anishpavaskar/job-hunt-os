@@ -1,4 +1,5 @@
 import type { NextRequest } from "next/server";
+import { startApiRequest } from "@/lib/server/api-debug";
 import { buildDraftSubject, saveDraftForJob } from "@/src/commands/draft";
 import { initDb } from "@/src/db";
 import {
@@ -28,8 +29,10 @@ export async function POST(
   context: { params: Promise<{ jobId: string }> },
 ) {
   const { jobId } = await context.params;
+  const logger = startApiRequest("/api/jobs/[jobId]/draft", { jobId });
   const numericJobId = parseJobId(jobId);
   if (numericJobId == null) {
+    logger.finish({ status: 400, invalidJobId: jobId });
     return Response.json({ error: "Invalid job id." }, { status: 400 });
   }
 
@@ -40,33 +43,36 @@ export async function POST(
   } | null;
 
   const db = await initDb();
-  const job = await getJobById(db, numericJobId);
+  const job = await logger.query("getJobById", () => getJobById(db, numericJobId));
   if (!job) {
+    logger.finish({ status: 404, numericJobId });
     return Response.json({ error: "Job not found." }, { status: 404 });
   }
 
   if (body?.action === "gmail") {
-    const existingDraft = await getLatestDraftByJobId(db, numericJobId);
+    const existingDraft = await logger.query("getLatestDraftByJobId", () => getLatestDraftByJobId(db, numericJobId));
     if (!existingDraft) {
+      logger.finish({ status: 404, numericJobId, reason: "missing_saved_draft" });
       return Response.json({ error: "No saved draft exists for this job." }, { status: 404 });
     }
 
-    const gmailDraftId = await createGmailDraft(
+    const gmailDraftId = await logger.query("createGmailDraft", () => createGmailDraft(
       "",
       buildDraftSubject(job),
       existingDraft.edited_content ?? existingDraft.generated_content,
-    );
+    ));
 
-    await upsertDraft(db, {
+    await logger.query("upsertDraft", () => upsertDraft(db, {
       jobId: numericJobId,
       applicationId: existingDraft.application_id,
       variant: existingDraft.variant,
       generatedContent: existingDraft.generated_content,
       editedContent: existingDraft.edited_content,
       gmailDraftId,
-    });
+    }));
 
-    const refreshedDraft = await getLatestDraftByJobId(db, numericJobId);
+    const refreshedDraft = await logger.query("getLatestDraftByJobId_after_upsert", () => getLatestDraftByJobId(db, numericJobId));
+    logger.finish({ status: 200, numericJobId, action: "gmail" });
     return Response.json({
       ok: true,
       jobId: numericJobId,
@@ -75,17 +81,18 @@ export async function POST(
     });
   }
 
-  await saveDraftForJob(db, job, {
+  await logger.query("saveDraftForJob", () => saveDraftForJob(db, job, {
     variant: body?.variant ?? "default",
     markDrafted: true,
     notes: parseNote(body?.note),
-  });
+  }));
 
   const [application, draft] = await Promise.all([
-    getApplicationByJobId(db, numericJobId),
-    getLatestDraftByJobId(db, numericJobId),
+    logger.query("getApplicationByJobId", () => getApplicationByJobId(db, numericJobId)),
+    logger.query("getLatestDraftByJobId", () => getLatestDraftByJobId(db, numericJobId)),
   ]);
 
+  logger.finish({ status: 200, numericJobId, action: "generate" });
   return Response.json({
     ok: true,
     jobId: numericJobId,

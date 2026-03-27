@@ -144,7 +144,13 @@ export function JobDetailDrawer({
   }, [open]);
 
   useEffect(() => {
-    if (!open || !jobId) return;
+    if (!open) return;
+    if (!jobId || jobId === "undefined" || jobId === "null") {
+      console.error("[JobDetailDrawer] invalid job id", { open, jobId });
+      setPageError("Invalid job id.");
+      setData(null);
+      return;
+    }
 
     let cancelled = false;
     setIsLoading(true);
@@ -153,7 +159,10 @@ export function JobDetailDrawer({
     setNotesMessage(null);
     setDraftMessage(null);
 
-    fetch(`/api/jobs/${jobId}`, { cache: "no-store" })
+    const detailUrl = `/api/jobs/${jobId}`;
+    console.log("[JobDetailDrawer] fetch_start", { jobId, detailUrl });
+
+    fetch(detailUrl, { cache: "no-store" })
       .then(async (response) => {
         const payload = await response.json().catch(() => null);
         if (!response.ok) {
@@ -168,6 +177,11 @@ export function JobDetailDrawer({
       })
       .catch((error: unknown) => {
         if (cancelled) return;
+        console.error("[JobDetailDrawer] fetch_error", {
+          jobId,
+          detailUrl,
+          error: error instanceof Error ? error.message : String(error),
+        });
         setPageError(error instanceof Error ? error.message : "Failed to load job details.");
         setData(null);
       })

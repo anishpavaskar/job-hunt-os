@@ -1,5 +1,6 @@
 import type { NextRequest } from "next/server";
 import { initDb } from "@/src/db";
+import { startApiRequest } from "@/lib/server/api-debug";
 import {
   createFollowup,
   getApplicationByJobId,
@@ -45,17 +46,26 @@ export async function GET(
   context: { params: Promise<{ jobId: string }> },
 ) {
   const { jobId } = await context.params;
+  const logger = startApiRequest("/api/jobs/[jobId]", { method: "GET", jobId });
   const numericJobId = parseJobId(jobId);
   if (numericJobId == null) {
+    logger.finish({ status: 400, invalidJobId: jobId });
     return Response.json({ error: "Invalid job id." }, { status: 400 });
   }
 
-  const detail = await getJobDetailData(numericJobId);
-  if (!detail) {
-    return Response.json({ error: "Job not found." }, { status: 404 });
-  }
+  try {
+    const detail = await logger.query("getJobDetailData", () => getJobDetailData(numericJobId));
+    if (!detail) {
+      logger.finish({ status: 404, numericJobId });
+      return Response.json({ error: "Job not found." }, { status: 404 });
+    }
 
-  return Response.json(detail);
+    logger.finish({ status: 200, numericJobId, company: detail.company, title: detail.title });
+    return Response.json(detail);
+  } catch (error) {
+    logger.fail(error);
+    throw error;
+  }
 }
 
 export async function PATCH(
@@ -63,8 +73,10 @@ export async function PATCH(
   context: { params: Promise<{ jobId: string }> },
 ) {
   const { jobId } = await context.params;
+  const logger = startApiRequest("/api/jobs/[jobId]", { method: "PATCH", jobId });
   const numericJobId = parseJobId(jobId);
   if (numericJobId == null) {
+    logger.finish({ status: 400, invalidJobId: jobId });
     return Response.json({ error: "Invalid job id." }, { status: 400 });
   }
 
@@ -85,11 +97,16 @@ export async function PATCH(
   const note = parseNote(body?.note);
 
   const db = await initDb();
-  const existingApplication = await getApplicationByJobId(db, numericJobId);
+  const existingApplication = await logger.query(
+    "getApplicationByJobId",
+    () => getApplicationByJobId(db, numericJobId),
+  );
   if (!requestedStatus && note === undefined) {
+    logger.finish({ status: 400, reason: "no_changes" });
     return Response.json({ error: "No job changes were provided." }, { status: 400 });
   }
   if (!requestedStatus && !existingApplication) {
+    logger.finish({ status: 400, reason: "missing_application_for_note" });
     return Response.json({ error: "Save a status first before storing notes." }, { status: 400 });
   }
 
@@ -98,14 +115,19 @@ export async function PATCH(
       return Response.json({ error: "Reviewed is only available before an application record exists." }, { status: 400 });
     }
 
-    const { error } = await db
-      .from("jobs")
-      .update({ status: "reviewed", updated_at: new Date().toISOString() })
-      .eq("id", numericJobId);
+      const { error } = await logger.query(
+        "mark_reviewed",
+        () => db
+          .from("jobs")
+          .update({ status: "reviewed", updated_at: new Date().toISOString() })
+          .eq("id", numericJobId),
+      );
     if (error) {
+      logger.fail(error);
       return Response.json({ error: `Failed to update job: ${error.message}` }, { status: 500 });
     }
 
+    logger.finish({ status: 200, numericJobId, nextStatus: "reviewed" });
     return Response.json({
       ok: true,
       jobId: numericJobId,
@@ -122,7 +144,7 @@ export async function PATCH(
     ? existingApplication?.applied_at ?? new Date().toISOString()
     : undefined;
 
-  await upsertApplication(db, numericJobId, {
+  await logger.query("upsertApplication", () => upsertApplication(db, numericJobId, {
     status,
     note,
     appliedAt,
@@ -131,29 +153,36 @@ export async function PATCH(
     lastContactedAt: status === "applied" || status === "replied" || status === "interview"
       ? new Date().toISOString()
       : undefined,
-  });
+  }));
 
   if (status === "applied" || status === "followup_due") {
-    const pendingFollowup = await getPendingFollowupByJobId(db, numericJobId);
+    const pendingFollowup = await logger.query(
+      "getPendingFollowupByJobId",
+      () => getPendingFollowupByJobId(db, numericJobId),
+    );
     if (!pendingFollowup) {
       const followupDueAt = new Date();
       followupDueAt.setDate(followupDueAt.getDate() + 7);
-      const application = await getApplicationByJobId(db, numericJobId);
-      await createFollowup(
+      const application = await logger.query(
+        "getApplicationByJobId_for_followup",
+        () => getApplicationByJobId(db, numericJobId),
+      );
+      await logger.query("createFollowup", () => createFollowup(
         db,
         numericJobId,
         application?.id ?? null,
         followupDueAt.toISOString(),
         "Follow up on application",
-      );
+      ));
     }
   }
 
   const [application, followup] = await Promise.all([
-    getApplicationByJobId(db, numericJobId),
-    getPendingFollowupByJobId(db, numericJobId),
+    logger.query("getApplicationByJobId_after_update", () => getApplicationByJobId(db, numericJobId)),
+    logger.query("getPendingFollowupByJobId_after_update", () => getPendingFollowupByJobId(db, numericJobId)),
   ]);
 
+  logger.finish({ status: 200, numericJobId, nextStatus: status });
   return Response.json({
     ok: true,
     jobId: numericJobId,

@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
-import { initDb } from "@/src/db";
-import { listBrowseJobs } from "@/src/db/repositories";
+import { getSupabase } from "@/src/db";
+import { normalizeJobRow } from "@/src/db/repositories";
+import { startApiRequest } from "@/lib/server/api-debug";
 import type { BrowseFilters, JobStatus } from "@/src/db/types";
 import { toWebJob } from "@/lib/server/web-data";
 
@@ -45,9 +46,16 @@ function parseNumber(value: string | null): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
+function escapeLike(value: string): string {
+  return value.replace(/[,%_]/g, "");
+}
+
 export async function GET(request: NextRequest) {
   const params = request.nextUrl.searchParams;
-  const db = await initDb();
+  const logger = startApiRequest("/api/jobs", {
+    rawQuery: request.nextUrl.search,
+  });
+  const db = getSupabase();
 
   const page = Math.max(1, parseNumber(params.get("page")) ?? 1);
   const pageSize = Math.min(100, Math.max(1, parseNumber(params.get("pageSize")) ?? 20));
@@ -60,17 +68,84 @@ export async function GET(request: NextRequest) {
     remoteOnly: params.get("remote") === "1",
     sort: parseSort(params),
     realRolesOnly: true,
-    limit: 5000,
   };
-
-  const jobs = await listBrowseJobs(db, filters);
-  const total = jobs.length;
   const start = (page - 1) * pageSize;
-  const pageItems = jobs.slice(start, start + pageSize).map(toWebJob);
+
+  let query = db
+    .from("jobs")
+    .select("*, job_sources!inner(provider, external_id, url)", { count: "exact" });
+
+  if (filters.query) {
+    const search = escapeLike(filters.query);
+    if (search) {
+      query = query.or(`company_name.ilike.%${search}%,title.ilike.%${search}%`);
+    }
+  }
+  if (filters.minScore != null) {
+    query = (query as any).gte("score", filters.minScore);
+  }
+  const maxScore = parseNumber(params.get("maxScore"));
+  if (maxScore != null) {
+    query = (query as any).lte("score", maxScore);
+  }
+  if (filters.status) {
+    query = query.eq("status", filters.status);
+  }
+  if (filters.remoteOnly) {
+    query = query.eq("remote_flag", true);
+  }
+  if (filters.source) {
+    query = query.eq("job_sources.provider", filters.source);
+  }
+  if (filters.realRolesOnly) {
+    query = (query as any).neq("role_source", "company_fallback");
+  }
+
+  switch (filters.sort) {
+    case "tracked":
+      query = query.order("created_at", { ascending: false }).order("id", { ascending: false });
+      break;
+    case "posted":
+      query = (query as any)
+        .order("posted_at", { ascending: false, nullsFirst: false })
+        .order("score", { ascending: false });
+      break;
+    case "company":
+      query = query.order("company_name", { ascending: true }).order("score", { ascending: false });
+      break;
+    default:
+      query = query.order("score", { ascending: false }).order("id", { ascending: false });
+      break;
+  }
+
+  const { data, error, count } = await logger.query(
+    "jobs_page",
+    () => query.range(start, start + pageSize - 1),
+  );
+  if (error) {
+    logger.fail(error);
+    return Response.json({ error: `Failed to load jobs: ${error.message}` }, { status: 500 });
+  }
+
+  const pageItems = (data ?? []).map((row) => toWebJob(normalizeJobRow(row))).map((job) => ({
+    ...job,
+    description: undefined,
+    explanation: undefined,
+  }));
+
+  logger.finish({
+    page,
+    pageSize,
+    returned: pageItems.length,
+    total: count ?? 0,
+    sort: filters.sort,
+    source: filters.source ?? "all",
+    status: filters.status ?? "all",
+  });
 
   return Response.json({
     jobs: pageItems,
-    total,
+    total: count ?? 0,
     page,
     pageSize,
   });
