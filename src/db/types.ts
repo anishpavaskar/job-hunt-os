@@ -179,6 +179,7 @@ export interface BrowseFilters {
   postedWithinDays?: number;
   trackedWithinDays?: number;
   sort?: "score" | "posted" | "tracked" | "company";
+  capPerCompany?: number | null;
   limit?: number;
 }
 

@@ -219,4 +219,57 @@ describe("browse command", () => {
     expect(asanaIndex).toBeGreaterThan(0);
     expect(scaleIndex).toBeLessThan(asanaIndex);
   });
+
+  test("caps browse results at ten roles per company", async () => {
+    const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
+    const scanId = await createScan(db, "greenhouse", new Date().toISOString());
+    const sourceId = await upsertJobSource(db, {
+      provider: "greenhouse",
+      externalId: "repeat-browse",
+      url: "https://job-boards.greenhouse.io/repeat-browse",
+    });
+
+    for (let index = 1; index <= 11; index += 1) {
+      await upsertJob(db, {
+        sourceId,
+        scanId,
+        externalKey: `greenhouse:repeat-browse:${index}`,
+        roleExternalId: `repeat-browse:${index}`,
+        roleSource: "greenhouse",
+        companyName: "RepeatBrowseCo",
+        title: `Infrastructure Engineer ${index}`,
+        summary: "Build distributed infrastructure systems",
+        website: "https://repeatbrowseco.com",
+        locations: "San Francisco, CA",
+        remoteFlag: false,
+        jobUrl: `https://repeatbrowseco.com/jobs/${index}`,
+        postedAt: `2026-03-${String(index).padStart(2, "0")}T12:00:00.000Z`,
+        regions: ["United States of America"],
+        tags: ["Infrastructure"],
+        industries: ["AI"],
+        stage: "Growth",
+        batch: "External",
+        teamSize: 500,
+        seniorityHint: "Senior",
+        extractedSkills: ["go", "kubernetes", "aws"],
+        topCompany: true,
+        isHiring: true,
+        score: 80 - index,
+        scoreReasons: ["role_fit", "stack_fit"],
+        scoreBreakdown: { roleFit: 16, stackFit: 15, seniorityFit: 6, freshness: 4, companySignal: 12, prospect_listed: true },
+        explanationBullets: ["Strong role fit for Infrastructure Engineer"],
+        riskBullets: ["Not clearly remote"],
+        status: "new",
+      });
+    }
+
+    const lines = await runBrowseCommand({
+      source: "greenhouse",
+      query: "RepeatBrowseCo",
+      limit: "20",
+    });
+    const repeatLines = lines.filter((line: string) => line.includes("RepeatBrowseCo"));
+
+    expect(repeatLines).toHaveLength(10);
+  });
 });

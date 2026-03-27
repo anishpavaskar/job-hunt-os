@@ -101,6 +101,39 @@ describe("Anthropic reranker", () => {
     expect(reranked.map((item) => item.id)).toEqual([2, 1]);
   });
 
+  test("salvages usable scores from malformed json-like responses", async () => {
+    const fetchMock = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        content: [
+          {
+            type: "text",
+            text: `Here are the scores:
+{"results":[{"id":2,"ai_score":90},{"id":1,"ai_score":27,reason:"broken"}]`,
+          },
+        ],
+      }),
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const items = [
+      { id: 1, company: "A", title: "Marketing Manager", summary: "GTM", score: 91 },
+      { id: 2, company: "B", title: "Platform Engineer", summary: "Infra", score: 80 },
+    ];
+
+    const reranked = await rerankItemsWithAnthropic(items, (item) => ({
+      id: item.id,
+      company: item.company,
+      title: item.title,
+      summary: item.summary,
+      locations: "Remote",
+      remoteFlag: true,
+      score: item.score,
+    }), { purpose: "review" });
+
+    expect(reranked.map((item) => item.id)).toEqual([2, 1]);
+  });
+
   test("falls back to original ordering when the API call fails", async () => {
     global.fetch = jest.fn().mockRejectedValue(new Error("network down")) as unknown as typeof fetch;
 

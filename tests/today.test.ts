@@ -187,7 +187,7 @@ describe("today command", () => {
     expect(lines[2]).toContain("apply today");
   });
 
-  test("filters weak technical matches and keeps stronger technical apply targets ahead of soft-signal matches", async () => {
+  test("filters weak technical matches and excludes generic soft-signal titles from the apply queue", async () => {
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
     const scanId = await createScan(db, "manual", new Date().toISOString());
 
@@ -308,13 +308,114 @@ describe("today command", () => {
 
     expect(combined).not.toContain("PreferenceOnlyCo");
     expect(deepFitIndex).toBeGreaterThanOrEqual(0);
-    expect(softSignalIndex).toBeGreaterThanOrEqual(0);
-    expect(deepFitIndex).toBeLessThan(softSignalIndex);
+    expect(softSignalIndex).toBe(-1);
     expect(lines[deepFitIndex]).toContain("Matched skills:");
-    expect(lines[softSignalIndex]).toContain("Aligned preferences:");
   });
 
-  test("excludes company fallback roles by default and can include them explicitly", async () => {
+  test("excludes business-adjacent and staff-plus titles from the apply queue", async () => {
+    const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
+    const scanId = await createScan(db, "manual", new Date().toISOString());
+
+    const excludedSourceId = await upsertJobSource(db, {
+      provider: "manual",
+      externalId: "excluded-business-titles",
+      url: "https://example.com/excluded-business-titles",
+    });
+
+    await upsertJob(db, {
+      sourceId: excludedSourceId,
+      scanId,
+      externalKey: "manual:marketing-manager",
+      roleExternalId: "marketing-manager",
+      roleSource: "imported_role",
+      companyName: "MarketCo",
+      title: "Account-Based Marketing Manager",
+      summary: "Own GTM campaigns for enterprise buyers",
+      website: "https://marketco.com",
+      locations: "San Francisco, CA",
+      remoteFlag: false,
+      jobUrl: "https://example.com/marketing-manager",
+      regions: ["United States"],
+      tags: ["AI"],
+      industries: ["SaaS"],
+      stage: "Growth",
+      batch: "Imported",
+      extractedSkills: ["API"],
+      topCompany: false,
+      isHiring: true,
+      score: 92,
+      scoreReasons: ["role_fit:24"],
+      scoreBreakdown: { roleFit: 24, stackFit: 12, seniorityFit: 10, freshness: 10, companySignal: 18 },
+      explanationBullets: ["Fresh role with strong company signal"],
+      riskBullets: ["Not clearly remote"],
+    });
+
+    await upsertJob(db, {
+      sourceId: excludedSourceId,
+      scanId,
+      externalKey: "manual:staff-platform",
+      roleExternalId: "staff-platform",
+      roleSource: "imported_role",
+      companyName: "StaffCo",
+      title: "Staff Software Engineer, Platform",
+      summary: "Lead platform systems evolution",
+      website: "https://staffco.com",
+      locations: "Remote",
+      remoteFlag: true,
+      jobUrl: "https://example.com/staff-platform",
+      regions: ["Remote"],
+      tags: ["Infrastructure"],
+      industries: ["Developer Tools"],
+      stage: "Growth",
+      batch: "Imported",
+      extractedSkills: ["Terraform", "Kubernetes"],
+      topCompany: true,
+      isHiring: true,
+      score: 94,
+      scoreReasons: ["role_fit:24"],
+      scoreBreakdown: { roleFit: 24, stackFit: 18, seniorityFit: 1, freshness: 10, companySignal: 18 },
+      explanationBullets: ["Excellent platform fit"],
+      riskBullets: ["Likely too senior for your current target level"],
+    });
+
+    await upsertJob(db, {
+      sourceId: excludedSourceId,
+      scanId,
+      externalKey: "manual:applied-ml",
+      roleExternalId: "applied-ml",
+      roleSource: "imported_role",
+      companyName: "AppliedMlCo",
+      title: "Senior Software Engineer - Network Enablement (Applied ML)",
+      summary: "Build ML-adjacent product capabilities for partner workflows",
+      website: "https://appliedmlco.com",
+      locations: "San Francisco, CA",
+      remoteFlag: false,
+      jobUrl: "https://example.com/applied-ml",
+      regions: ["United States"],
+      tags: ["AI"],
+      industries: ["Artificial Intelligence"],
+      stage: "Growth",
+      batch: "Imported",
+      extractedSkills: ["Python", "API"],
+      topCompany: true,
+      isHiring: true,
+      score: 95,
+      scoreReasons: ["role_fit:24"],
+      scoreBreakdown: { roleFit: 24, stackFit: 14, seniorityFit: 4, freshness: 10, companySignal: 18 },
+      explanationBullets: ["Strong role fit"],
+      riskBullets: ["Seniority fit is uncertain"],
+    });
+
+    const lines = await runTodayCommand({ limit: "10" });
+    const output = lines.join("\n");
+
+    expect(output).not.toContain("Account-Based Marketing Manager");
+    expect(output).not.toContain("Staff Software Engineer, Platform");
+    expect(output).not.toContain("Senior Software Engineer - Network Enablement (Applied ML)");
+    expect(output).toContain("ApplyToday");
+  });
+
+  test("keeps company fallback records out of the apply queue even when includeFallback is set", async () => {
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
     const scanId = await createScan(db, "manual", new Date().toISOString());
     const fallbackSourceId = await upsertJobSource(db, {
@@ -356,6 +457,52 @@ describe("today command", () => {
     const includeFallbackLines = await runTodayCommand({ limit: "10", includeFallback: true });
 
     expect(defaultLines.join("\n")).not.toContain("FallbackCo");
-    expect(includeFallbackLines.join("\n")).toContain("FallbackCo");
+    expect(includeFallbackLines.join("\n")).not.toContain("FallbackCo");
+  });
+
+  test("limits apply suggestions to ten roles per company", async () => {
+    const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
+    const scanId = await createScan(db, "manual", new Date().toISOString());
+    const sourceId = await upsertJobSource(db, {
+      provider: "manual",
+      externalId: "same-company-apply",
+      url: "https://example.com/same-company-apply",
+    });
+
+    for (let index = 1; index <= 11; index += 1) {
+      await upsertJob(db, {
+        sourceId,
+        scanId,
+        externalKey: `manual:same-company-apply:${index}`,
+        roleExternalId: `same-company-apply:${index}`,
+        roleSource: "imported_role",
+        companyName: "DuplicateCo",
+        title: index % 2 === 0 ? `Platform Engineer ${index}` : `Backend Engineer ${index}`,
+        summary: "Build platform and backend systems with Go, Kubernetes, and AWS",
+        website: "https://duplicateco.com",
+        locations: "Remote",
+        remoteFlag: true,
+        jobUrl: `https://example.com/duplicateco/${index}`,
+        regions: ["Remote"],
+        tags: ["Infrastructure"],
+        industries: ["Developer Tools"],
+        stage: "Growth",
+        batch: "Imported",
+        extractedSkills: ["Go", "Kubernetes", "AWS"],
+        topCompany: false,
+        isHiring: true,
+        score: 100 - index,
+        scoreReasons: ["role_fit:20"],
+        scoreBreakdown: { roleFit: 20, stackFit: 18, seniorityFit: 12, freshness: 10, companySignal: 12 },
+        explanationBullets: ["Strong role fit for infrastructure engineering"],
+        riskBullets: ["Compensation not disclosed"],
+        status: "shortlisted",
+      });
+    }
+
+    const lines = await runTodayCommand({ limit: "20" });
+    const duplicateLines = lines.filter((line) => line.includes("DuplicateCo"));
+
+    expect(duplicateLines).toHaveLength(10);
   });
 });

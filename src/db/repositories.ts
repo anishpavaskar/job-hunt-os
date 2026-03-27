@@ -2,6 +2,7 @@ import {
   IC_TITLE_KEYWORDS,
   MODERATE_MISMATCH_TITLE_KEYWORDS,
   STRONG_MISMATCH_TITLE_KEYWORDS,
+  SURFACED_ROLE_CAP_PER_COMPANY,
   TODAY_RANKING,
 } from "../../config/scoring";
 import { rerankItemsWithAnthropic } from "../ai/anthropic-rerank";
@@ -107,6 +108,63 @@ function titleRankingPenalty(title?: string | null): number {
   return penalty;
 }
 
+const APPLY_HARD_EXCLUDE_TITLE_KEYWORDS = [
+  "marketing",
+  "sales",
+  "sourcing",
+  "supply manager",
+  "supply chain",
+  "enablement",
+  "specialist",
+  "account executive",
+  "account-based",
+  "customer success",
+  "finance",
+  "gtm",
+  "go-to-market",
+  "scientist",
+  "analyst",
+  "recruiter",
+  "operations manager",
+] as const;
+
+const APPLY_TARGET_TITLE_KEYWORDS = [
+  "backend",
+  "platform",
+  "developer platform",
+  "infrastructure",
+  "infra",
+  "devops",
+  "site reliability",
+  "sre",
+  "reliability",
+  "distributed systems",
+  "deployment",
+  "cloud infrastructure",
+  "data infrastructure",
+  "ml infrastructure",
+  "machine learning infrastructure",
+  "storage",
+  "network",
+  "networking",
+  "data engineer",
+  "data engineering",
+] as const;
+
+function isHardApplyTitleMismatch(title?: string | null): boolean {
+  const normalized = normalizeTitle(title);
+  if (!normalized) return false;
+  if (hasKeyword(normalized, APPLY_HARD_EXCLUDE_TITLE_KEYWORDS)) return true;
+  if (normalized.includes("staff") || normalized.includes("principal")) return true;
+  return false;
+}
+
+function hasPreferredApplyTitleSignal(title?: string | null): boolean {
+  const normalized = normalizeTitle(title);
+  if (!normalized) return false;
+  return hasKeyword(normalized, APPLY_TARGET_TITLE_KEYWORDS);
+}
+
 function asArray(value: unknown): string[] {
   if (Array.isArray(value)) return value.map(String).filter(Boolean);
   if (typeof value === "string") {
@@ -167,6 +225,23 @@ function chunk<T>(items: T[], size: number): T[][] {
     out.push(items.slice(i, i + size));
   }
   return out;
+}
+
+function capItemsPerCompany<T>(
+  items: T[],
+  getCompanyName: (item: T) => string,
+  maxPerCompany: number | null,
+): T[] {
+  if (maxPerCompany == null) return items;
+  if (maxPerCompany <= 0) return [];
+  const companyCounts = new Map<string, number>();
+  return items.filter((item) => {
+    const key = getCompanyName(item).toLowerCase();
+    const count = companyCounts.get(key) ?? 0;
+    if (count >= maxPerCompany) return false;
+    companyCounts.set(key, count + 1);
+    return true;
+  });
 }
 
 function mapJobUpsertInput(input: JobUpsertInput): Record<string, unknown> {
@@ -593,7 +668,7 @@ export async function listJobs(
     { purpose: filters.todayOnly ? "apply" : "review", candidateLimit: Math.max(limit * 3, 30) },
   );
 
-  return rerankedJobs.slice(0, limit);
+  return capItemsPerCompany(rerankedJobs, (job) => job.company_name, SURFACED_ROLE_CAP_PER_COMPANY).slice(0, limit);
 }
 
 export async function getJobByQuery(
@@ -671,6 +746,9 @@ export async function listBrowseJobs(
   }
 
   const limit = filters.limit ?? 50;
+  const perCompanyCap = filters.capPerCompany === undefined
+    ? SURFACED_ROLE_CAP_PER_COMPANY
+    : filters.capPerCompany;
   const sortedJobs = jobs
     .sort((a, b) => {
       if (filters.sort === "posted") {
@@ -700,7 +778,7 @@ export async function listBrowseJobs(
     });
 
   if (filters.sort !== "score") {
-    return sortedJobs.slice(0, limit);
+    return capItemsPerCompany(sortedJobs, (job) => job.company_name, perCompanyCap).slice(0, limit);
   }
 
   const rerankedJobs = await rerankItemsWithAnthropic(
@@ -709,7 +787,7 @@ export async function listBrowseJobs(
     { purpose: "browse", candidateLimit: Math.max(limit * 3, 40) },
   );
 
-  return rerankedJobs.slice(0, limit);
+  return capItemsPerCompany(rerankedJobs, (job) => job.company_name, perCompanyCap).slice(0, limit);
 }
 
 export async function getApplicationByJobId(
@@ -1022,7 +1100,10 @@ export async function listNextActions(
     if (application && !["saved", "shortlisted"].includes(application.status as ApplicationStatus)) continue;
     if (actions.some((action) => action.jobId === job.id && action.actionType === "followup")) continue;
     if (isStrongTitleMismatch(job.title)) continue;
+    if (isHardApplyTitleMismatch(job.title)) continue;
+    if (!hasPreferredApplyTitleSignal(job.title)) continue;
     const breakdown = job.score_breakdown_json;
+    if (breakdown.seniorityFit <= 1) continue;
     if (!hasMinimumApplyFit(breakdown)) continue;
     const risk = buildRisk(job);
     actions.push({
@@ -1061,8 +1142,13 @@ export async function listNextActions(
     mapActionToAnthropicCandidate,
     { purpose: "apply", candidateLimit: Math.max(limit * 3, 25) },
   );
+  const cappedApplyActions = capItemsPerCompany(
+    rerankedApplyActions,
+    (action) => action.companyName,
+    TODAY_RANKING.applyMaxPerCompany,
+  );
 
-  return [...nonApplyActions, ...rerankedApplyActions].slice(0, limit);
+  return [...nonApplyActions, ...cappedApplyActions].slice(0, limit);
 }
 
 export async function createApplicationEvent(

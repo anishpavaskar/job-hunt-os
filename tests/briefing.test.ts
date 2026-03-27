@@ -272,23 +272,31 @@ describe("briefing data assembly", () => {
     expect(includeFallbackData.newRoles.map((role) => role.company)).toEqual(["FallbackCo", "RealRoleCo"]);
   });
 
-  test("assembleNewRoles caps repeated companies and inserts a summary row for overflow", async () => {
+  test("assembleNewRoles caps repeated companies at ten and inserts a summary row for overflow", async () => {
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
     const sourceId = await upsertJobSource(db, { provider: "test", externalId: "repeats", url: "https://test.com" });
     const scanId = await createScan(db, "test", new Date().toISOString());
 
-    await seedJob(db, sourceId, scanId, { externalKey: "t:r1", companyName: "RepeatCo", title: "Role 1", score: 91 });
-    await seedJob(db, sourceId, scanId, { externalKey: "t:r2", companyName: "RepeatCo", title: "Role 2", score: 88 });
-    await seedJob(db, sourceId, scanId, { externalKey: "t:r3", companyName: "RepeatCo", title: "Role 3", score: 84 });
-    await seedJob(db, sourceId, scanId, { externalKey: "t:r4", companyName: "OtherCo", title: "Role 4", score: 80 });
+    for (let index = 1; index <= 11; index += 1) {
+      await seedJob(db, sourceId, scanId, {
+        externalKey: `t:r${index}`,
+        companyName: "RepeatCo",
+        title: `Role ${index}`,
+        score: 100 - index,
+      });
+    }
+    await seedJob(db, sourceId, scanId, { externalKey: "t:otherco", companyName: "OtherCo", title: "Role 4", score: 80 });
     db.prepare(`UPDATE jobs SET created_at = ?, updated_at = ?`).run("2026-03-26 10:00:00", "2026-03-26 10:00:00");
 
     const roles = await assembleNewRoles(db, new Set(), "2026-03-26");
 
-    expect(roles.map((role) => role.company)).toEqual(["RepeatCo", "RepeatCo", "RepeatCo", "OtherCo"]);
-    expect(roles[2].kind).toBe("overflow");
-    expect(roles[2].role).toContain("+1 more roles at RepeatCo");
-    expect(roles[2].rank).toBeNull();
+    const repeatRoleEntries = roles.filter((role) => role.company === "RepeatCo" && role.kind === "role");
+    const overflowEntry = roles.find((role) => role.company === "RepeatCo" && role.kind === "overflow");
+
+    expect(repeatRoleEntries).toHaveLength(10);
+    expect(overflowEntry?.role).toContain("+1 more roles at RepeatCo");
+    expect(overflowEntry?.rank).toBeNull();
+    expect(roles.some((role) => role.company === "OtherCo")).toBe(true);
   });
 
   test("assembleBriefingData builds a deduped apply-now section", async () => {

@@ -30,7 +30,7 @@ type AnthropicRerankResult = {
 };
 
 const DEFAULT_ANTHROPIC_RERANK_MODEL = "claude-haiku-4-5-20251001";
-const DEFAULT_ANTHROPIC_RERANK_LIMIT = 40;
+const DEFAULT_ANTHROPIC_RERANK_LIMIT = 25;
 const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
 
 function stripHtml(value: string): string {
@@ -141,6 +141,30 @@ function normalizeResults(payload: unknown): AnthropicRerankResult[] {
   });
 }
 
+function salvageResultsFromText(text: string): AnthropicRerankResult[] {
+  const results: AnthropicRerankResult[] = [];
+  const seenIds = new Set<number>();
+  const patterns = [
+    /(?:\"id\"|id)\s*:\s*(\d+)[\s\S]{0,160}?(?:\"ai_score\"|ai_score)\s*:\s*(-?\d+(?:\.\d+)?)/gi,
+    /(?:\"ai_score\"|ai_score)\s*:\s*(-?\d+(?:\.\d+)?)[\s\S]{0,160}?(?:\"id\"|id)\s*:\s*(\d+)/gi,
+  ];
+
+  for (const pattern of patterns) {
+    for (const match of text.matchAll(pattern)) {
+      const maybeId = Number(pattern === patterns[0] ? match[1] : match[2]);
+      const maybeScore = Number(pattern === patterns[0] ? match[2] : match[1]);
+      if (!Number.isFinite(maybeId) || !Number.isFinite(maybeScore) || seenIds.has(maybeId)) continue;
+      seenIds.add(maybeId);
+      results.push({
+        id: maybeId,
+        ai_score: Math.max(0, Math.min(100, Math.round(maybeScore))),
+      });
+    }
+  }
+
+  return results;
+}
+
 function buildProfileBlock(profile?: Profile): string {
   if (!profile) {
     return [
@@ -196,11 +220,9 @@ function buildPrompt(
     remote: candidate.remoteFlag,
     role_source: candidate.roleSource ?? null,
     status: candidate.status ?? null,
-    extracted_skills: (candidate.extractedSkills ?? []).slice(0, 8),
+    extracted_skills: (candidate.extractedSkills ?? []).slice(0, 6),
     score_breakdown: candidate.scoreBreakdown ?? null,
-    explanation_bullets: (candidate.explanationBullets ?? []).slice(0, 2),
-    risk_bullets: (candidate.riskBullets ?? []).slice(0, 2),
-    summary: compactText(candidate.summary, 700),
+    summary: compactText(candidate.summary, 320),
   }));
 
   return [
@@ -214,8 +236,9 @@ function buildPrompt(
     "- Penalize people management roles unless they are unusually hands-on and still clearly aligned with the target profile.",
     "- Penalize jobs with unclear technical depth, stale postings, or obvious location mismatch.",
     "- Remote or Bay Area hybrid is a positive, but should not overpower role mismatch.",
-    "Return JSON only with this shape:",
-    '{"results":[{"id":123,"ai_score":87,"bucket":"apply_now","reason":"why it fits","risk":"top risk"}]}',
+    "Return JSON only. No markdown. No code fences. No commentary.",
+    "Return exactly this shape:",
+    '{"results":[{"id":123,"ai_score":87}]}',
     "Score every candidate from 0-100.",
     `Candidates:\n${JSON.stringify(serialized, null, 2)}`,
   ].join("\n\n");
@@ -241,7 +264,7 @@ async function requestAnthropicRerank(
       },
       body: JSON.stringify({
         model: getRerankModel(),
-        max_tokens: 2200,
+        max_tokens: 1200,
         temperature: 0,
         messages: [
           {
@@ -265,7 +288,13 @@ async function requestAnthropicRerank(
       return null;
     }
 
-    const parsed = normalizeResults(parseJsonBlock(text));
+    let parsed: AnthropicRerankResult[] = [];
+    try {
+      parsed = normalizeResults(parseJsonBlock(text));
+    } catch {
+      parsed = salvageResultsFromText(text);
+    }
+
     if (parsed.length === 0) {
       console.warn("[anthropic] rerank skipped: no usable scores returned");
       return null;

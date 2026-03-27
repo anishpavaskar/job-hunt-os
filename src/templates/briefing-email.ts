@@ -51,6 +51,32 @@ function daysSince(isoDate: string | null): number | null {
   return Math.floor((now.getTime() - then.getTime()) / 86_400_000);
 }
 
+function getDashboardBaseUrl(): string | null {
+  const value = process.env.DASHBOARD_URL?.trim();
+  if (!value) return null;
+  return value.replace(/\/+$/, "");
+}
+
+function buildDashboardUrl(pathname: string, params?: Record<string, string>): string | null {
+  const base = getDashboardBaseUrl();
+  if (!base) return null;
+
+  try {
+    const url = new URL(pathname, `${base}/`);
+    if (params) {
+      for (const [key, value] of Object.entries(params)) {
+        url.searchParams.set(key, value);
+      }
+    }
+    return url.toString();
+  } catch {
+    const query = params
+      ? `?${new URLSearchParams(params).toString()}`
+      : "";
+    return `${base}${pathname}${query}`;
+  }
+}
+
 // ─── Pill / badge builders ──────────────────────────────────────
 
 function scoreBadge(score: number): string {
@@ -133,7 +159,7 @@ function renderRoleCard(role: BriefingNewRole): string {
     ? `<p style="margin:8px 0 0;font-size:12px;color:${C.textTertiary};font-family:${FONT};">&#x26A0; ${h(role.topRisk)}</p>`
     : "";
 
-  const href = role.applyLink ?? "#";
+  const href = buildDashboardUrl("/roles", { q: role.company }) ?? role.applyLink ?? "#";
 
   return `<tr><td style="padding:0 0 10px;">
 <a href="${h(href)}" style="display:block;text-decoration:none;color:inherit;">
@@ -197,7 +223,7 @@ function renderApplyNowCard(role: BriefingData["applyNow"][number]): string {
     ? `<p style="margin:8px 0 0;font-size:12px;color:${C.textTertiary};font-family:${FONT};">&#x26A0; ${h(role.topRisk)}</p>`
     : "";
 
-  const href = role.applyLink || "#";
+  const href = buildDashboardUrl("/roles", { q: role.company }) ?? role.applyLink ?? "#";
 
   return `<tr><td style="padding:0 0 10px;">
 <a href="${h(href)}" style="display:block;text-decoration:none;color:inherit;">
@@ -238,6 +264,7 @@ export function renderBriefingEmail(data: BriefingData): string {
   const topScore = topVisibleRole?.score ?? 0;
   const topScoreColor = topScore >= 80 ? C.greenText : C.textPrimary;
   const followupColor = followups.length > 0 ? C.amberText : C.textPrimary;
+  const dashboardHomeUrl = buildDashboardUrl("/");
 
   // Top 8 shown fully; remainder collapsed
   const shownRoles = newRoles.slice(0, 8);
@@ -293,6 +320,9 @@ ${sectionHeader("Follow-ups Due")}
   <p style="margin:0 0 8px;font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:${C.textTertiary};font-family:${FONT};">Job Hunt OS</p>
   <p style="margin:0 0 8px;font-size:22px;font-weight:500;color:${C.textPrimary};font-family:${FONT};">${h(formatDisplayDate(date))}</p>
   <p style="margin:0;font-size:14px;color:${C.textSecondary};font-family:${FONT};">${h(actualRolesCount)} tracked roles &middot; ${h(above70)} above 70</p>
+  ${dashboardHomeUrl
+    ? `<p style="margin:10px 0 0;font-size:13px;font-family:${FONT};"><a href="${h(dashboardHomeUrl)}" style="color:${C.blueText};text-decoration:none;font-weight:600;">View dashboard &rarr;</a></p>`
+    : ""}
 </td></tr>
 
 ${divider()}
@@ -338,6 +368,9 @@ ${followupsSection}
 ${divider()}
 <tr><td style="padding:24px 0 0;text-align:center;">
   <p style="margin:0;font-size:12px;color:${C.textTertiary};font-family:${FONT};">job-hunt-os &middot; scanned ${h(sourcesScanned)} sources &middot; ${h(totalTracked)} roles tracked</p>
+  ${dashboardHomeUrl
+    ? `<p style="margin:10px 0 0;font-size:13px;font-family:${FONT};"><a href="${h(dashboardHomeUrl)}" style="color:${C.blueText};text-decoration:none;font-weight:600;">View dashboard &rarr;</a></p>`
+    : ""}
 </td></tr>
 
 </table>

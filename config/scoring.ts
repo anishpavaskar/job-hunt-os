@@ -89,10 +89,13 @@ export const SCORING_WEIGHTS = {
   prospectBoost: 8,
 } as const;
 
+export const SURFACED_ROLE_CAP_PER_COMPANY = 10;
+
 export const TODAY_RANKING = {
   applyMinRoleFit: 8,
   applyMinStackFit: 8,
   applyMinCombinedFit: 22,
+  applyMaxPerCompany: SURFACED_ROLE_CAP_PER_COMPANY,
   strongRoleFit: 14,
   strongStackFit: 16,
   applyBaseScore: 10,

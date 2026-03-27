@@ -12,3 +12,5 @@ region = "us-west1"
 # Cron trigger: 7:00 AM PST = 2:00 PM UTC daily
 # Set via Railway dashboard: Settings → Cron → "0 14 * * *"
 # Or use the CRON_SCHEDULE env var
+# Also set DASHBOARD_URL in Railway so briefing emails and health smoke tests
+# point at the deployed dashboard.

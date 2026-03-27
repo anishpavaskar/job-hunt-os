@@ -2,6 +2,8 @@ data/yc_hiring_raw.json
 data/matches.json
 data/scan_log.json
 data/job_hunt.db
+data/job_hunt.db-*
+data/job_hunt.db*.bak
 data/outreach-batch.json
 data/outreach-batch.md
 .env
@@ -11,7 +13,9 @@ dist
 .next/
 out/
 tsconfig.tsbuildinfo
+tsconfig.web.tsbuildinfo
 litestream.yml
 credentials.json
 client_secret_*.json
 .DS_Store
+.vercel

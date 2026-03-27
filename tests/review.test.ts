@@ -138,4 +138,50 @@ describe("review command", () => {
     expect(lines[0]).toContain("ReviewCo");
     expect(lines[1]).toContain("ManagerCo");
   });
+
+  test("caps surfaced review results at ten roles per company", async () => {
+    const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
+    const scanId = await createScan(db, "yc", new Date().toISOString());
+    const sourceId = await upsertJobSource(db, {
+      provider: "yc",
+      externalId: "review-many",
+      url: "https://yc.com/review-many",
+    });
+
+    for (let index = 1; index <= 11; index += 1) {
+      await upsertJob(db, {
+        sourceId,
+        scanId,
+        externalKey: `role:repeat-review:${index}`,
+        roleExternalId: `repeat-review:${index}`,
+        roleSource: "role",
+        companyName: "RepeatReviewCo",
+        title: `Platform Engineer ${index}`,
+        summary: "Remote infra role",
+        website: "https://repeatreviewco.com",
+        locations: "Remote",
+        remoteFlag: true,
+        jobUrl: `https://repeatreviewco.com/jobs/${index}`,
+        regions: ["Remote"],
+        tags: ["Infrastructure"],
+        industries: ["Artificial Intelligence"],
+        stage: "Growth",
+        batch: "Winter 2025",
+        seniorityHint: "Senior",
+        score: 90 - index,
+        scoreReasons: ["role_fit:18", "stack_fit:22"],
+        extractedSkills: ["AI", "Infrastructure", "Kubernetes"],
+        scoreBreakdown: { roleFit: 18, stackFit: 22, seniorityFit: 12, freshness: 9, companySignal: 14 },
+        explanationBullets: ["Strong role fit for Platform Engineer"],
+        riskBullets: ["Compensation not disclosed"],
+        topCompany: true,
+        isHiring: true,
+      });
+    }
+
+    const lines = await runReviewCommand({ limit: "20" });
+    const repeatLines = lines.filter((line) => line.includes("RepeatReviewCo"));
+
+    expect(repeatLines).toHaveLength(10);
+  });
 });

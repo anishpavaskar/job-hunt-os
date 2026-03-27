@@ -21,6 +21,7 @@ import type {
 import { countActualNewRoles } from "../briefing/types";
 import { sendBriefingHtmlEmail } from "../integrations/gmail";
 import { loadProfile } from "../config/profile";
+import { SURFACED_ROLE_CAP_PER_COMPANY } from "../../config/scoring";
 import type { Profile } from "../config/types";
 import type { ApplicationStatus, JobRecord } from "../db/types";
 
@@ -98,6 +99,7 @@ export async function assembleNewRoles(
     minScore,
     realRolesOnly: !includeFallback,
     sort: "score",
+    capPerCompany: null,
     limit: 5000,
   });
   const { data: applicationsData, error: applicationsError } = await db.from("applications").select("job_id,status");
@@ -123,7 +125,6 @@ export async function assembleNewRoles(
     .sort((a, b) => b.score - a.score || a.company_name.localeCompare(b.company_name))
     .slice(0, 50);
 
-  const MAX_ROLES_PER_COMPANY = 2;
   const output: BriefingNewRole[] = [];
   const companyCounts = new Map<string, number>();
   const totalPerCompany = new Map<string, number>();
@@ -141,8 +142,8 @@ export async function assembleNewRoles(
     const seen = (companyCounts.get(companyLower) ?? 0) + 1;
     companyCounts.set(companyLower, seen);
 
-    if (seen > MAX_ROLES_PER_COMPANY) {
-      const overflowCount = (totalPerCompany.get(companyLower) ?? 0) - MAX_ROLES_PER_COMPANY;
+    if (seen > SURFACED_ROLE_CAP_PER_COMPANY) {
+      const overflowCount = (totalPerCompany.get(companyLower) ?? 0) - SURFACED_ROLE_CAP_PER_COMPANY;
       if (overflowCount > 0 && !output.some((role) => role.kind === "overflow" && role.company === row.company_name)) {
         output.push({
           kind: "overflow" as const,

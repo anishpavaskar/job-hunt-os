@@ -1,6 +1,8 @@
 import { renderBriefingEmail } from "../src/templates/briefing-email";
 import type { BriefingData, BriefingNewRole, BriefingFollowup } from "../src/briefing/types";
 
+const ORIGINAL_DASHBOARD_URL = process.env.DASHBOARD_URL;
+
 // ─── Fixtures ──────────────────────────────────────────────────
 
 function makeRole(overrides: Partial<BriefingNewRole> = {}): BriefingNewRole {
@@ -60,6 +62,14 @@ function makeData(overrides: Partial<BriefingData> = {}): BriefingData {
 // ─── Tests ─────────────────────────────────────────────────────
 
 describe("renderBriefingEmail", () => {
+  beforeEach(() => {
+    process.env.DASHBOARD_URL = "https://dashboard.example.com";
+  });
+
+  afterAll(() => {
+    process.env.DASHBOARD_URL = ORIGINAL_DASHBOARD_URL;
+  });
+
   describe("structure", () => {
     it("returns a full HTML document", () => {
       const html = renderBriefingEmail(makeData());
@@ -144,6 +154,12 @@ describe("renderBriefingEmail", () => {
       ];
       const html = renderBriefingEmail(makeData({ newRoles: roles }));
       expect(html).toContain("7 tracked roles");
+    });
+
+    it("renders a dashboard link at the top of the email", () => {
+      const html = renderBriefingEmail(makeData());
+      expect(html).toContain("https://dashboard.example.com/");
+      expect(html).toContain("View dashboard");
     });
   });
 
@@ -283,11 +299,11 @@ describe("renderBriefingEmail", () => {
       expect(html).toContain("Tracked 2026-03-26");
     });
 
-    it("renders apply link on the card", () => {
+    it("renders a dashboard roles link on the card", () => {
       const html = renderBriefingEmail(
-        makeData({ newRoles: [makeRole({ applyLink: "https://example.com/apply" })] }),
+        makeData({ newRoles: [makeRole({ company: "Open AI Research" })] }),
       );
-      expect(html).toContain("https://example.com/apply");
+      expect(html).toContain("https://dashboard.example.com/roles?q=Open+AI+Research");
     });
 
     it("renders top risk line", () => {
@@ -348,7 +364,7 @@ describe("renderBriefingEmail", () => {
       expect(html).toContain("Best Apply-Now");
       expect(html).toContain("Figma");
       expect(html).toContain("Strong unapplied match in your queue");
-      expect(html).toContain("https://figma.com/jobs/1");
+      expect(html).toContain("https://dashboard.example.com/roles?q=Figma");
     });
 
     it("shows an empty state when no apply-now roles exist", () => {
@@ -404,6 +420,12 @@ describe("renderBriefingEmail", () => {
     it("renders job-hunt-os label", () => {
       const html = renderBriefingEmail(makeData());
       expect(html).toContain("job-hunt-os");
+    });
+
+    it("renders a dashboard link at the bottom of the email", () => {
+      const html = renderBriefingEmail(makeData());
+      expect(html).toContain("https://dashboard.example.com/");
+      expect(html).toContain("View dashboard");
     });
   });
 
