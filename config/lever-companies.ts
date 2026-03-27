@@ -4,5 +4,5 @@ export interface LeverCompany {
 }
 
 export const LEVER_COMPANIES: LeverCompany[] = [
-  { slug: "netflix", name: "Netflix" },
+  { slug: "plaid", name: "Plaid" },
 ];
