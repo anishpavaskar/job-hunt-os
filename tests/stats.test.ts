@@ -9,27 +9,27 @@ describe("stats and outcome tracking", () => {
   let tmpDir: string;
   let previousCwd: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     previousCwd = process.cwd();
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "job-hunt-stats-"));
     fs.mkdirSync(path.join(tmpDir, "data"), { recursive: true });
     process.chdir(tmpDir);
     resetDb();
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
-    const scanId = createScan(db, "yc", new Date().toISOString());
+    const scanId = await createScan(db, "yc", new Date().toISOString());
 
-    const ycSource = upsertJobSource(db, {
+    const ycSource = await upsertJobSource(db, {
       provider: "yc",
       externalId: "yc-role-1",
       url: "https://yc.example/role-1",
     });
-    const manualSource = upsertJobSource(db, {
+    const manualSource = await upsertJobSource(db, {
       provider: "manual",
       externalId: "manual-role-1",
       url: "https://manual.example/role-1",
     });
 
-    const job1 = upsertJob(db, {
+    const job1 = await upsertJob(db, {
       sourceId: ycSource,
       scanId,
       externalKey: "role:yc:1",
@@ -58,7 +58,7 @@ describe("stats and outcome tracking", () => {
       status: "saved",
     });
 
-    const job2 = upsertJob(db, {
+    const job2 = await upsertJob(db, {
       sourceId: ycSource,
       scanId,
       externalKey: "role:yc:2",
@@ -87,7 +87,7 @@ describe("stats and outcome tracking", () => {
       status: "applied",
     });
 
-    const job3 = upsertJob(db, {
+    const job3 = await upsertJob(db, {
       sourceId: manualSource,
       scanId,
       externalKey: "role:manual:1",
@@ -116,15 +116,15 @@ describe("stats and outcome tracking", () => {
       status: "replied",
     });
 
-    upsertApplication(db, job1, {
+    await upsertApplication(db, job1, {
       status: "saved",
     });
-    upsertApplication(db, job2, {
+    await upsertApplication(db, job2, {
       status: "applied",
       appliedAt: "2026-01-01T00:00:00.000Z",
       lastContactedAt: "2026-01-01T00:00:00.000Z",
     });
-    const applicationId = upsertApplication(db, job3, {
+    const applicationId = await upsertApplication(db, job3, {
       status: "interview",
       appliedAt: "2026-01-05T00:00:00.000Z",
       responseReceived: true,
@@ -133,7 +133,7 @@ describe("stats and outcome tracking", () => {
       lastContactedAt: "2026-01-08T00:00:00.000Z",
     });
 
-    expect(getApplicationEvents(db, applicationId)).toHaveLength(1);
+    expect(await getApplicationEvents(db, applicationId)).toHaveLength(1);
   });
 
   afterEach(() => {
@@ -141,8 +141,8 @@ describe("stats and outcome tracking", () => {
     closeDb();
   });
 
-  test("stats command shows funnel and breakdowns", () => {
-    const output = runStatsCommand();
+  test("stats command shows funnel and breakdowns", async () => {
+    const output = await runStatsCommand();
     expect(output).toContain("Conversion Funnel");
     expect(output).toContain("saved: 3");
     expect(output).toContain("applied: 2");
@@ -154,17 +154,17 @@ describe("stats and outcome tracking", () => {
     expect(output).toContain("yc");
   });
 
-  test("application outcome fields are recorded in events metadata", () => {
+  test("application outcome fields are recorded in events metadata", async () => {
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
     const application = db
       .prepare(`SELECT * FROM applications WHERE status = 'interview'`)
-      .get() as { id: number; response_received: number; response_type: string; interview_stage: string };
-    expect(application.response_received).toBe(1);
+      .get() as { id: number; response_received: boolean; response_type: string; interview_stage: string };
+    expect(application.response_received).toBe(true);
     expect(application.response_type).toBe("email");
     expect(application.interview_stage).toBe("technical");
 
-    const events = getApplicationEvents(db, application.id);
-    const metadata = JSON.parse(events[0].metadata_json) as Record<string, unknown>;
+    const events = await getApplicationEvents(db, application.id);
+    const metadata = events[0].metadata_json as Record<string, unknown>;
     expect(metadata.responseReceived).toBe(true);
     expect(metadata.responseType).toBe("email");
     expect(metadata.interviewStage).toBe("technical");

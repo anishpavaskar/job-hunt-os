@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { GreenhouseCompany } from "../../config/greenhouse-companies";
-import type { NormalizedOpportunity } from "./normalize";
+import { extractPostedAt, type NormalizedOpportunity } from "./normalize";
 import { RESUME_KEYWORDS, TIER1_TAGS, TIER2_TAGS } from "../../config/scoring";
 
 // ─── Greenhouse API schemas ────────────────────────────────────
@@ -82,6 +82,7 @@ function normalizeGreenhouseJob(
   job: GreenhouseJob,
 ): NormalizedOpportunity {
   const plainContent = stripHtml(job.content);
+  const rawJob = job as unknown as Record<string, unknown>;
 
   return {
     externalKey: `greenhouse:${company.slug}:${job.id}`,
@@ -92,6 +93,7 @@ function normalizeGreenhouseJob(
     locations: job.location.name,
     remoteFlag: inferRemote(job.location.name),
     jobUrl: job.absolute_url,
+    postedAt: extractPostedAt(rawJob, plainContent),
     seniorityHint: inferSeniority(job.title),
     extractedSkills: extractSkills(job.title, plainContent),
   };
@@ -112,15 +114,64 @@ export interface GreenhouseSlugAuditEntry {
   jobsReturned: number;
 }
 
+interface FetchGreenhouseOptions {
+  audit?: (entry: GreenhouseSlugAuditEntry) => void;
+  skipDetails?: boolean;
+  sleepFn?: (ms: number) => Promise<void>;
+  logger?: Pick<Console, "log" | "warn">;
+}
+
+function needsDetailFetch(content: string): boolean {
+  return stripHtml(content).length < 50;
+}
+
+async function fetchGreenhouseJobDetail(
+  company: GreenhouseCompany,
+  job: GreenhouseJob,
+  fetchFn: typeof globalThis.fetch,
+  logger: Pick<Console, "log" | "warn">,
+): Promise<GreenhouseJob | null> {
+  const url = `${BOARDS_API}/${company.slug}/jobs/${job.id}`;
+  let response: Response;
+
+  try {
+    response = await fetchFn(url);
+  } catch (err) {
+    logger.warn(`[greenhouse] Detail fetch failed for ${company.name} job ${job.id} (${url}): ${err}`);
+    return null;
+  }
+
+  if (!response.ok) {
+    logger.warn(`[greenhouse] Detail fetch HTTP ${response.status} for ${company.name} job ${job.id} (${url})`);
+    return null;
+  }
+
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    logger.warn(`[greenhouse] Detail fetch invalid JSON for ${company.name} job ${job.id}`);
+    return null;
+  }
+
+  const detailResult = greenhouseJobSchema.safeParse(payload);
+  if (!detailResult.success) {
+    logger.warn(`[greenhouse] Detail fetch invalid shape for ${company.name} job ${job.id}: ${detailResult.error.message}`);
+    return null;
+  }
+
+  return detailResult.data;
+}
+
 export async function fetchGreenhouseJobs(
   companies: GreenhouseCompany[],
   /** Override fetch for testing */
   fetchFn: typeof globalThis.fetch = globalThis.fetch,
-  opts: {
-    audit?: (entry: GreenhouseSlugAuditEntry) => void;
-  } = {},
+  opts: FetchGreenhouseOptions = {},
 ): Promise<NormalizedOpportunity[]> {
   const allJobs: NormalizedOpportunity[] = [];
+  const sleepBetweenRequests = opts.sleepFn ?? sleep;
+  const logger = opts.logger ?? console;
 
   for (let i = 0; i < companies.length; i++) {
     const company = companies[i];
@@ -134,7 +185,7 @@ export async function fetchGreenhouseJobs(
     };
 
     // Rate limiting: 500ms between requests (skip before first)
-    if (i > 0) await sleep(500);
+    if (i > 0) await sleepBetweenRequests(500);
 
     const url = `${BOARDS_API}/${company.slug}/jobs`;
     let response: Response;
@@ -169,13 +220,38 @@ export async function fetchGreenhouseJobs(
     }
 
     let jobsReturned = 0;
-    for (const rawJob of listResult.data.jobs) {
+    let detailFetchCount = 0;
+    for (let jobIndex = 0; jobIndex < listResult.data.jobs.length; jobIndex++) {
+      const rawJob = listResult.data.jobs[jobIndex];
       const jobResult = greenhouseJobSchema.safeParse(rawJob);
       if (!jobResult.success) {
-        console.warn(`[greenhouse] Skipping invalid job from ${company.name}: ${jobResult.error.message}`);
+        logger.warn(`[greenhouse] Skipping invalid job from ${company.name}: ${jobResult.error.message}`);
         continue;
       }
-      allJobs.push(normalizeGreenhouseJob(company, jobResult.data));
+
+      let job = jobResult.data;
+
+      if (!opts.skipDetails && needsDetailFetch(job.content)) {
+        if ((jobIndex + 1) % 10 === 0 || jobIndex + 1 === listResult.data.jobs.length) {
+          logger.log(`[greenhouse] Fetching details for ${company.name}: ${jobIndex + 1}/${listResult.data.jobs.length}`);
+        }
+
+        if (detailFetchCount > 0) {
+          await sleepBetweenRequests(200);
+        }
+
+        detailFetchCount += 1;
+        const detail = await fetchGreenhouseJobDetail(company, job, fetchFn, logger);
+        if (detail) {
+          job = {
+            ...job,
+            ...detail,
+            content: detail.content || job.content,
+          };
+        }
+      }
+
+      allJobs.push(normalizeGreenhouseJob(company, job));
       jobsReturned += 1;
     }
     reportAudit(`HTTP ${response.status}`, jobsReturned);

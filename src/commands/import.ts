@@ -4,7 +4,7 @@ import path from "path";
 import { z } from "zod";
 import { loadProfile } from "../config/profile";
 import { initDb } from "../db";
-import { completeScan, createScan, upsertJob, upsertJobSource } from "../db/repositories";
+import { completeScan, createScan, upsertJobSource, upsertJobsBatch } from "../db/repositories";
 import { normalizeCompanyFallback, NormalizedOpportunity, toJobUpsertInput } from "../ingest/normalize";
 import { scoreOpportunity } from "../score/scorer";
 import type { YcCompany } from "../ingest/yc";
@@ -187,35 +187,33 @@ export async function runImportCommand(filePath: string, format?: string): Promi
   validCount: number;
   imported: number;
 }> {
-  const db = initDb();
+  const db = await initDb();
   const profile = loadProfile();
   const absolute = path.resolve(filePath);
   const rows = loadRows(absolute, format);
-  const scanId = createScan(db, "manual", new Date().toISOString());
+  const scanId = await createScan(db, "manual", new Date().toISOString());
 
   let validCount = 0;
-  let imported = 0;
+  const upserts = [];
 
-  const transaction = db.transaction((items: unknown[]) => {
-    for (const raw of items) {
-      const parsed = importedJobSchema.safeParse(raw);
-      if (!parsed.success) continue;
-      validCount += 1;
-      const company = toYcLikeCompany(parsed.data);
-      const opportunity = toImportedOpportunity(parsed.data, company);
-      const scoring = scoreOpportunity(company, opportunity, profile);
-      const sourceId = upsertJobSource(db, {
-        provider: "manual",
-        externalId: parsed.data.external_id ?? company.slug,
-        url: opportunity.jobUrl || company.url || company.website,
-      });
-      upsertJob(db, toJobUpsertInput(company, opportunity, sourceId, scanId, scoring));
-      imported += 1;
-    }
-  });
+  for (const raw of rows) {
+    const parsed = importedJobSchema.safeParse(raw);
+    if (!parsed.success) continue;
+    validCount += 1;
+    const company = toYcLikeCompany(parsed.data);
+    const opportunity = toImportedOpportunity(parsed.data, company);
+    const scoring = scoreOpportunity(company, opportunity, profile);
+    const sourceId = await upsertJobSource(db, {
+      provider: "manual",
+      externalId: parsed.data.external_id ?? company.slug,
+      url: opportunity.jobUrl || company.url || company.website,
+    });
+    upserts.push(toJobUpsertInput(company, opportunity, sourceId, scanId, scoring));
+  }
 
-  transaction(rows);
-  completeScan(db, scanId, rows.length, validCount, new Date().toISOString());
+  await upsertJobsBatch(db, upserts);
+  const imported = upserts.length;
+  await completeScan(db, scanId, rows.length, validCount, new Date().toISOString());
 
   return { rawCount: rows.length, validCount, imported };
 }

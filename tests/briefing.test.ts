@@ -17,12 +17,13 @@ import {
   assembleDrafts,
   assembleWeeklyFunnel,
   assembleBriefingData,
-  getBriefingSmsSummary,
+  runBriefingCommand,
 } from "../src/commands/briefing";
+import * as gmailIntegration from "../src/integrations/gmail";
 
 // ─── Test helpers ──────────────────────────────────────────────
 
-function seedJob(
+async function seedJob(
   db: ReturnType<typeof initDb>,
   sourceId: number,
   scanId: number,
@@ -86,23 +87,24 @@ describe("briefing data assembly", () => {
   });
 
   afterEach(() => {
+    jest.restoreAllMocks();
     process.chdir(previousCwd);
     closeDb();
   });
 
-  test("assembleNewRoles uses the 50-point default threshold and sorts by score", () => {
+  test("assembleNewRoles uses the 50-point default threshold and sorts by score", async () => {
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
-    const sourceId = upsertJobSource(db, { provider: "test", externalId: "s1", url: "https://test.com" });
-    const scanId = createScan(db, "test", new Date().toISOString());
-    completeScan(db, scanId, 1, 1, new Date().toISOString());
+    const sourceId = await upsertJobSource(db, { provider: "test", externalId: "s1", url: "https://test.com" });
+    const scanId = await createScan(db, "test", new Date().toISOString());
+    await completeScan(db, scanId, 1, 1, new Date().toISOString());
 
-    seedJob(db, sourceId, scanId, { externalKey: "t:1", companyName: "HighCo", title: "Staff SRE", score: 92 });
-    seedJob(db, sourceId, scanId, { externalKey: "t:2", companyName: "MidCo", title: "Backend Eng", score: 55 });
-    seedJob(db, sourceId, scanId, { externalKey: "t:3", companyName: "LowCo", title: "Junior Dev", score: 49 });
+    await seedJob(db, sourceId, scanId, { externalKey: "t:1", companyName: "HighCo", title: "Staff SRE", score: 92 });
+    await seedJob(db, sourceId, scanId, { externalKey: "t:2", companyName: "MidCo", title: "Backend Eng", score: 55 });
+    await seedJob(db, sourceId, scanId, { externalKey: "t:3", companyName: "LowCo", title: "Junior Dev", score: 49 });
 
     db.prepare(`UPDATE jobs SET created_at = ?, updated_at = ?`).run("2026-03-26T10:00:00.000Z", "2026-03-26T10:00:00.000Z");
 
-    const roles = assembleNewRoles(db, new Set(), "2026-03-26");
+    const roles = await assembleNewRoles(db, new Set(), "2026-03-26");
 
     expect(roles).toHaveLength(2);
     expect(roles[0].company).toBe("HighCo");
@@ -113,28 +115,28 @@ describe("briefing data assembly", () => {
     expect(roles[1].rank).toBe(2);
   });
 
-  test("assembleNewRoles flags prospect companies", () => {
+  test("assembleNewRoles flags prospect companies", async () => {
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
-    const sourceId = upsertJobSource(db, { provider: "test", externalId: "s1", url: "https://test.com" });
-    const scanId = createScan(db, "test", new Date().toISOString());
+    const sourceId = await upsertJobSource(db, { provider: "test", externalId: "s1", url: "https://test.com" });
+    const scanId = await createScan(db, "test", new Date().toISOString());
 
-    seedJob(db, sourceId, scanId, { externalKey: "t:p1", companyName: "Anthropic", title: "SWE", score: 88 });
-    seedJob(db, sourceId, scanId, { externalKey: "t:p2", companyName: "RandomCo", title: "SWE", score: 80 });
+    await seedJob(db, sourceId, scanId, { externalKey: "t:p1", companyName: "Anthropic", title: "SWE", score: 88 });
+    await seedJob(db, sourceId, scanId, { externalKey: "t:p2", companyName: "RandomCo", title: "SWE", score: 80 });
     db.prepare(`UPDATE jobs SET created_at = ?, updated_at = ?`).run("2026-03-26T10:00:00.000Z", "2026-03-26T10:00:00.000Z");
 
     const prospectNames = new Set(["anthropic"]);
-    const roles = assembleNewRoles(db, prospectNames, "2026-03-26");
+    const roles = await assembleNewRoles(db, prospectNames, "2026-03-26");
 
     expect(roles[0].isProspect).toBe(true);
     expect(roles[1].isProspect).toBe(false);
   });
 
-  test("assembleNewRoles includes explanation and risk bullets", () => {
+  test("assembleNewRoles includes explanation and risk bullets", async () => {
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
-    const sourceId = upsertJobSource(db, { provider: "test", externalId: "s1", url: "https://test.com" });
-    const scanId = createScan(db, "test", new Date().toISOString());
+    const sourceId = await upsertJobSource(db, { provider: "test", externalId: "s1", url: "https://test.com" });
+    const scanId = await createScan(db, "test", new Date().toISOString());
 
-    seedJob(db, sourceId, scanId, {
+    await seedJob(db, sourceId, scanId, {
       externalKey: "t:e1",
       companyName: "ExplainCo",
       score: 85,
@@ -143,22 +145,22 @@ describe("briefing data assembly", () => {
     });
     db.prepare(`UPDATE jobs SET created_at = ?, updated_at = ?`).run("2026-03-26T10:00:00.000Z", "2026-03-26T10:00:00.000Z");
 
-    const roles = assembleNewRoles(db, new Set(), "2026-03-26");
+    const roles = await assembleNewRoles(db, new Set(), "2026-03-26");
 
     expect(roles[0].whyItFits).toBe("Great stack overlap with Kubernetes");
     expect(roles[0].topRisk).toBe("No comp info");
   });
 
-  test("assembleFollowups returns pending followups with last action", () => {
+  test("assembleFollowups returns pending followups with last action", async () => {
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
-    const sourceId = upsertJobSource(db, { provider: "test", externalId: "s1", url: "https://test.com" });
-    const scanId = createScan(db, "test", new Date().toISOString());
+    const sourceId = await upsertJobSource(db, { provider: "test", externalId: "s1", url: "https://test.com" });
+    const scanId = await createScan(db, "test", new Date().toISOString());
 
-    const jobId = seedJob(db, sourceId, scanId, { externalKey: "t:f1", companyName: "FollowCo", title: "Platform Eng" });
-    const appId = upsertApplication(db, jobId, { status: "applied", note: "Applied via website" });
-    createFollowup(db, jobId, appId, "2026-04-01", "Check back on application");
+    const jobId = await seedJob(db, sourceId, scanId, { externalKey: "t:f1", companyName: "FollowCo", title: "Platform Eng" });
+    const appId = await upsertApplication(db, jobId, { status: "applied", note: "Applied via website" });
+    await createFollowup(db, jobId, appId, "2026-04-01", "Check back on application");
 
-    const followups = assembleFollowups(db);
+    const followups = await assembleFollowups(db);
 
     expect(followups).toHaveLength(1);
     expect(followups[0].company).toBe("FollowCo");
@@ -168,75 +170,75 @@ describe("briefing data assembly", () => {
     expect(followups[0].lastAction).toContain("followup created");
   });
 
-  test("assembleDrafts returns unsent drafts", () => {
+  test("assembleDrafts returns unsent drafts", async () => {
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
-    const sourceId = upsertJobSource(db, { provider: "test", externalId: "s1", url: "https://test.com" });
-    const scanId = createScan(db, "test", new Date().toISOString());
+    const sourceId = await upsertJobSource(db, { provider: "test", externalId: "s1", url: "https://test.com" });
+    const scanId = await createScan(db, "test", new Date().toISOString());
 
-    const jobId = seedJob(db, sourceId, scanId, { externalKey: "t:d1", companyName: "DraftCo", title: "DevOps Eng" });
-    upsertApplication(db, jobId, { status: "drafted" });
-    upsertDraft(db, { jobId, variant: "v1", generatedContent: "Hello DraftCo..." });
+    const jobId = await seedJob(db, sourceId, scanId, { externalKey: "t:d1", companyName: "DraftCo", title: "DevOps Eng" });
+    await upsertApplication(db, jobId, { status: "drafted" });
+    await upsertDraft(db, { jobId, variant: "v1", generatedContent: "Hello DraftCo..." });
 
-    const drafts = assembleDrafts(db);
+    const drafts = await assembleDrafts(db);
 
     expect(drafts).toHaveLength(1);
     expect(drafts[0].company).toBe("DraftCo");
     expect(drafts[0].draftVariant).toBe("v1");
   });
 
-  test("assembleDrafts excludes drafts with applied status", () => {
+  test("assembleDrafts excludes drafts with applied status", async () => {
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
-    const sourceId = upsertJobSource(db, { provider: "test", externalId: "s1", url: "https://test.com" });
-    const scanId = createScan(db, "test", new Date().toISOString());
+    const sourceId = await upsertJobSource(db, { provider: "test", externalId: "s1", url: "https://test.com" });
+    const scanId = await createScan(db, "test", new Date().toISOString());
 
-    const jobId = seedJob(db, sourceId, scanId, { externalKey: "t:d2", companyName: "SentCo", title: "SRE" });
-    const appId = upsertApplication(db, jobId, { status: "applied" });
-    upsertDraft(db, { jobId, applicationId: appId, variant: "v1", generatedContent: "Already sent" });
+    const jobId = await seedJob(db, sourceId, scanId, { externalKey: "t:d2", companyName: "SentCo", title: "SRE" });
+    const appId = await upsertApplication(db, jobId, { status: "applied" });
+    await upsertDraft(db, { jobId, applicationId: appId, variant: "v1", generatedContent: "Already sent" });
 
-    const drafts = assembleDrafts(db);
+    const drafts = await assembleDrafts(db);
     expect(drafts).toHaveLength(0);
   });
 
-  test("assembleWeeklyFunnel returns conversion stats", () => {
+  test("assembleWeeklyFunnel returns conversion stats", async () => {
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
-    const sourceId = upsertJobSource(db, { provider: "test", externalId: "s1", url: "https://test.com" });
-    const scanId = createScan(db, "test", new Date().toISOString());
+    const sourceId = await upsertJobSource(db, { provider: "test", externalId: "s1", url: "https://test.com" });
+    const scanId = await createScan(db, "test", new Date().toISOString());
 
-    const j1 = seedJob(db, sourceId, scanId, { externalKey: "t:w1", companyName: "A", score: 80 });
-    const j2 = seedJob(db, sourceId, scanId, { externalKey: "t:w2", companyName: "B", score: 75 });
-    seedJob(db, sourceId, scanId, { externalKey: "t:w3", companyName: "C", score: 60 });
+    const j1 = await seedJob(db, sourceId, scanId, { externalKey: "t:w1", companyName: "A", score: 80 });
+    const j2 = await seedJob(db, sourceId, scanId, { externalKey: "t:w2", companyName: "B", score: 75 });
+    await seedJob(db, sourceId, scanId, { externalKey: "t:w3", companyName: "C", score: 60 });
 
-    upsertApplication(db, j1, { status: "applied", appliedAt: new Date().toISOString() });
-    upsertApplication(db, j2, { status: "interview", appliedAt: new Date().toISOString() });
+    await upsertApplication(db, j1, { status: "applied", appliedAt: new Date().toISOString() });
+    await upsertApplication(db, j2, { status: "interview", appliedAt: new Date().toISOString() });
 
-    const funnel = assembleWeeklyFunnel(db);
+    const funnel = await assembleWeeklyFunnel(db);
 
     expect(funnel.totalTracked).toBe(3);
     expect(funnel.appliedThisWeek).toBe(2);
     expect(funnel.interviewsScheduled).toBe(1);
   });
 
-  test("assembleBriefingData includes funnel only on Mondays", () => {
+  test("assembleBriefingData includes funnel only on Mondays", async () => {
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
 
     // 2026-03-30 is a Monday
-    const monday = assembleBriefingData(db, "2026-03-30");
+    const monday = await assembleBriefingData(db, "2026-03-30");
     expect(monday.funnel).not.toBeNull();
 
     // 2026-03-31 is a Tuesday
-    const tuesday = assembleBriefingData(db, "2026-03-31");
+    const tuesday = await assembleBriefingData(db, "2026-03-31");
     expect(tuesday.funnel).toBeNull();
   });
 
-  test("assembleBriefingData ties all sections together", () => {
+  test("assembleBriefingData ties all sections together", async () => {
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
-    const sourceId = upsertJobSource(db, { provider: "test", externalId: "s1", url: "https://test.com" });
-    const scanId = createScan(db, "test", new Date().toISOString());
+    const sourceId = await upsertJobSource(db, { provider: "test", externalId: "s1", url: "https://test.com" });
+    const scanId = await createScan(db, "test", new Date().toISOString());
 
-    seedJob(db, sourceId, scanId, { externalKey: "t:all1", companyName: "Co1", score: 80 });
+    await seedJob(db, sourceId, scanId, { externalKey: "t:all1", companyName: "Co1", score: 80 });
     db.prepare(`UPDATE jobs SET created_at = ?, updated_at = ?`).run("2026-03-26T10:00:00.000Z", "2026-03-26T10:00:00.000Z");
 
-    const data = assembleBriefingData(db, "2026-03-26");
+    const data = await assembleBriefingData(db, "2026-03-26");
 
     expect(data.date).toBe("2026-03-26");
     expect(Array.isArray(data.applyNow)).toBe(true);
@@ -247,13 +249,13 @@ describe("briefing data assembly", () => {
     expect(data.funnel).toBeNull();
   });
 
-  test("assembleBriefingData excludes company fallback roles by default and can include them explicitly", () => {
+  test("assembleBriefingData excludes company fallback roles by default and can include them explicitly", async () => {
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
-    const sourceId = upsertJobSource(db, { provider: "test", externalId: "s1", url: "https://test.com" });
-    const scanId = createScan(db, "test", new Date().toISOString());
+    const sourceId = await upsertJobSource(db, { provider: "test", externalId: "s1", url: "https://test.com" });
+    const scanId = await createScan(db, "test", new Date().toISOString());
 
-    seedJob(db, sourceId, scanId, { externalKey: "t:real", companyName: "RealRoleCo", title: "Platform Engineer", score: 78 });
-    seedJob(db, sourceId, scanId, {
+    await seedJob(db, sourceId, scanId, { externalKey: "t:real", companyName: "RealRoleCo", title: "Platform Engineer", score: 78 });
+    await seedJob(db, sourceId, scanId, {
       externalKey: "company:fallbackco",
       companyName: "FallbackCo",
       title: null,
@@ -263,25 +265,25 @@ describe("briefing data assembly", () => {
     });
     db.prepare(`UPDATE jobs SET created_at = ?, updated_at = ?`).run("2026-03-26T10:00:00.000Z", "2026-03-26T10:00:00.000Z");
 
-    const defaultData = assembleBriefingData(db, "2026-03-26");
-    const includeFallbackData = assembleBriefingData(db, "2026-03-26", { includeFallback: true });
+    const defaultData = await assembleBriefingData(db, "2026-03-26");
+    const includeFallbackData = await assembleBriefingData(db, "2026-03-26", { includeFallback: true });
 
     expect(defaultData.newRoles.map((role) => role.company)).toEqual(["RealRoleCo"]);
     expect(includeFallbackData.newRoles.map((role) => role.company)).toEqual(["FallbackCo", "RealRoleCo"]);
   });
 
-  test("assembleNewRoles caps repeated companies and inserts a summary row for overflow", () => {
+  test("assembleNewRoles caps repeated companies and inserts a summary row for overflow", async () => {
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
-    const sourceId = upsertJobSource(db, { provider: "test", externalId: "repeats", url: "https://test.com" });
-    const scanId = createScan(db, "test", new Date().toISOString());
+    const sourceId = await upsertJobSource(db, { provider: "test", externalId: "repeats", url: "https://test.com" });
+    const scanId = await createScan(db, "test", new Date().toISOString());
 
-    seedJob(db, sourceId, scanId, { externalKey: "t:r1", companyName: "RepeatCo", title: "Role 1", score: 91 });
-    seedJob(db, sourceId, scanId, { externalKey: "t:r2", companyName: "RepeatCo", title: "Role 2", score: 88 });
-    seedJob(db, sourceId, scanId, { externalKey: "t:r3", companyName: "RepeatCo", title: "Role 3", score: 84 });
-    seedJob(db, sourceId, scanId, { externalKey: "t:r4", companyName: "OtherCo", title: "Role 4", score: 80 });
+    await seedJob(db, sourceId, scanId, { externalKey: "t:r1", companyName: "RepeatCo", title: "Role 1", score: 91 });
+    await seedJob(db, sourceId, scanId, { externalKey: "t:r2", companyName: "RepeatCo", title: "Role 2", score: 88 });
+    await seedJob(db, sourceId, scanId, { externalKey: "t:r3", companyName: "RepeatCo", title: "Role 3", score: 84 });
+    await seedJob(db, sourceId, scanId, { externalKey: "t:r4", companyName: "OtherCo", title: "Role 4", score: 80 });
     db.prepare(`UPDATE jobs SET created_at = ?, updated_at = ?`).run("2026-03-26 10:00:00", "2026-03-26 10:00:00");
 
-    const roles = assembleNewRoles(db, new Set(), "2026-03-26");
+    const roles = await assembleNewRoles(db, new Set(), "2026-03-26");
 
     expect(roles.map((role) => role.company)).toEqual(["RepeatCo", "RepeatCo", "RepeatCo", "OtherCo"]);
     expect(roles[2].kind).toBe("overflow");
@@ -289,17 +291,17 @@ describe("briefing data assembly", () => {
     expect(roles[2].rank).toBeNull();
   });
 
-  test("assembleBriefingData builds a deduped apply-now section", () => {
+  test("assembleBriefingData builds a deduped apply-now section", async () => {
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
-    const sourceId = upsertJobSource(db, { provider: "test", externalId: "apply-now", url: "https://test.com" });
-    const scanId = createScan(db, "test", new Date().toISOString());
+    const sourceId = await upsertJobSource(db, { provider: "test", externalId: "apply-now", url: "https://test.com" });
+    const scanId = await createScan(db, "test", new Date().toISOString());
 
-    seedJob(db, sourceId, scanId, { externalKey: "t:a1", companyName: "ApplyCo", title: "Platform Engineer", score: 90, locations: "Remote" });
-    seedJob(db, sourceId, scanId, { externalKey: "t:a2", companyName: "ApplyCo", title: "Backend Engineer", score: 88, locations: "Remote" });
-    seedJob(db, sourceId, scanId, { externalKey: "t:a3", companyName: "OtherApplyCo", title: "SRE", score: 84, locations: "San Francisco, CA | Seattle, WA" });
+    await seedJob(db, sourceId, scanId, { externalKey: "t:a1", companyName: "ApplyCo", title: "Platform Engineer", score: 90, locations: "Remote" });
+    await seedJob(db, sourceId, scanId, { externalKey: "t:a2", companyName: "ApplyCo", title: "Backend Engineer", score: 88, locations: "Remote" });
+    await seedJob(db, sourceId, scanId, { externalKey: "t:a3", companyName: "OtherApplyCo", title: "SRE", score: 84, locations: "San Francisco, CA | Seattle, WA" });
     db.prepare(`UPDATE jobs SET created_at = ?, updated_at = ?`).run("2026-03-26 10:00:00", "2026-03-26 10:00:00");
 
-    const data = assembleBriefingData(db, "2026-03-26");
+    const data = await assembleBriefingData(db, "2026-03-26");
 
     expect(data.applyNow.length).toBeGreaterThanOrEqual(2);
     expect(data.applyNow[0].company).toBe("ApplyCo");
@@ -308,12 +310,12 @@ describe("briefing data assembly", () => {
     expect(data.applyNow.find((role) => role.company === "OtherApplyCo")?.location).toBe("San Francisco, CA • Seattle, WA");
   });
 
-  test("assembleBriefingData keeps strong apply-now roles even when they were discovered before the briefing date", () => {
+  test("assembleBriefingData keeps strong apply-now roles even when they were discovered before the briefing date", async () => {
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
-    const sourceId = upsertJobSource(db, { provider: "test", externalId: "apply-queue", url: "https://test.com" });
-    const scanId = createScan(db, "test", new Date().toISOString());
+    const sourceId = await upsertJobSource(db, { provider: "test", externalId: "apply-queue", url: "https://test.com" });
+    const scanId = await createScan(db, "test", new Date().toISOString());
 
-    const oldStrongJobId = seedJob(db, sourceId, scanId, {
+    const oldStrongJobId = await seedJob(db, sourceId, scanId, {
       externalKey: "t:queued-old",
       companyName: "QueuedCo",
       title: "Platform Engineer",
@@ -332,18 +334,18 @@ describe("briefing data assembly", () => {
       oldStrongJobId,
     );
 
-    const data = assembleBriefingData(db, "2026-03-26");
+    const data = await assembleBriefingData(db, "2026-03-26");
 
     expect(data.newRoles).toHaveLength(0);
     expect(data.applyNow.some((role) => role.company === "QueuedCo")).toBe(true);
   });
 
-  test("assembleBriefingData falls back to technically decent roles when strict apply-now queue is empty", () => {
+  test("assembleBriefingData falls back to technically decent roles when strict apply-now queue is empty", async () => {
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
-    const sourceId = upsertJobSource(db, { provider: "test", externalId: "apply-fallback", url: "https://test.com" });
-    const scanId = createScan(db, "test", new Date().toISOString());
+    const sourceId = await upsertJobSource(db, { provider: "test", externalId: "apply-fallback", url: "https://test.com" });
+    const scanId = await createScan(db, "test", new Date().toISOString());
 
-    const fallbackJobId = seedJob(db, sourceId, scanId, {
+    const fallbackJobId = await seedJob(db, sourceId, scanId, {
       externalKey: "t:apply-fallback",
       companyName: "FallbackApplyCo",
       title: "Software Engineer",
@@ -362,24 +364,24 @@ describe("briefing data assembly", () => {
       fallbackJobId,
     );
 
-    const data = assembleBriefingData(db, "2026-03-26");
+    const data = await assembleBriefingData(db, "2026-03-26");
 
     expect(data.applyNow.some((role) => role.company === "FallbackApplyCo")).toBe(true);
   });
 
-  test("assembleBriefingData uses the requested date window for new roles", () => {
+  test("assembleBriefingData uses the requested date window for new roles", async () => {
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
-    const sourceId = upsertJobSource(db, { provider: "test", externalId: "s1", url: "https://test.com" });
-    const scanId = createScan(db, "test", new Date().toISOString());
+    const sourceId = await upsertJobSource(db, { provider: "test", externalId: "s1", url: "https://test.com" });
+    const scanId = await createScan(db, "test", new Date().toISOString());
 
-    const olderJobId = seedJob(db, sourceId, scanId, { externalKey: "t:dated-old", companyName: "OldCo", score: 85 });
-    const currentJobId = seedJob(db, sourceId, scanId, { externalKey: "t:dated-new", companyName: "NewCo", score: 82 });
+    const olderJobId = await seedJob(db, sourceId, scanId, { externalKey: "t:dated-old", companyName: "OldCo", score: 85 });
+    const currentJobId = await seedJob(db, sourceId, scanId, { externalKey: "t:dated-new", companyName: "NewCo", score: 82 });
 
     db.prepare(`UPDATE jobs SET created_at = ?, updated_at = ? WHERE id = ?`).run("2026-03-25T10:00:00.000Z", "2026-03-25T10:00:00.000Z", olderJobId);
     db.prepare(`UPDATE jobs SET created_at = ?, updated_at = ? WHERE id = ?`).run("2026-03-26T10:00:00.000Z", "2026-03-26T10:00:00.000Z", currentJobId);
 
-    const olderDay = assembleBriefingData(db, "2026-03-25");
-    const currentDay = assembleBriefingData(db, "2026-03-26");
+    const olderDay = await assembleBriefingData(db, "2026-03-25");
+    const currentDay = await assembleBriefingData(db, "2026-03-26");
 
     expect(olderDay.newRoles).toHaveLength(1);
     expect(olderDay.newRoles[0].company).toBe("OldCo");
@@ -387,71 +389,73 @@ describe("briefing data assembly", () => {
     expect(currentDay.newRoles[0].company).toBe("NewCo");
   });
 
-  test("assembleNewRoles matches rows stored with SQLite datetime format", () => {
+  test("assembleBriefingData uses tracked open roles by default, not only recent rows", async () => {
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
-    const sourceId = upsertJobSource(db, { provider: "test", externalId: "sqlite-dt", url: "https://test.com" });
-    const scanId = createScan(db, "test", new Date().toISOString());
+    const sourceId = await upsertJobSource(db, { provider: "test", externalId: "baseline", url: "https://test.com" });
+    const scanId = await createScan(db, "test", new Date().toISOString());
 
-    seedJob(db, sourceId, scanId, { externalKey: "t:sqlite-dt", companyName: "SqliteTimeCo", score: 77 });
+    const oldOpenJobId = await seedJob(db, sourceId, scanId, {
+      externalKey: "t:baseline-old",
+      companyName: "BaselineCo",
+      title: "Backend Engineer",
+      score: 77,
+    });
+    const recentOpenJobId = await seedJob(db, sourceId, scanId, {
+      externalKey: "t:baseline-recent",
+      companyName: "RecentCo",
+      title: "Platform Engineer",
+      score: 72,
+    });
+    const appliedJobId = await seedJob(db, sourceId, scanId, {
+      externalKey: "t:baseline-applied",
+      companyName: "AppliedCo",
+      title: "Infra Engineer",
+      score: 80,
+    });
+
+    db.prepare(`UPDATE jobs SET created_at = ?, updated_at = ? WHERE id = ?`).run("2026-02-20T10:00:00.000Z", "2026-02-20T10:00:00.000Z", oldOpenJobId);
+    db.prepare(`UPDATE jobs SET created_at = ?, updated_at = ? WHERE id = ?`).run("2026-03-26T10:00:00.000Z", "2026-03-26T10:00:00.000Z", recentOpenJobId);
+    db.prepare(`UPDATE jobs SET created_at = ?, updated_at = ? WHERE id = ?`).run("2026-02-18T10:00:00.000Z", "2026-02-18T10:00:00.000Z", appliedJobId);
+
+    await upsertApplication(db, appliedJobId, { status: "applied" });
+
+    const data = await assembleBriefingData(db);
+
+    expect(data.newRoles.some((role) => role.company === "BaselineCo")).toBe(true);
+    expect(data.newRoles.some((role) => role.company === "RecentCo")).toBe(true);
+    expect(data.newRoles.some((role) => role.company === "AppliedCo")).toBe(false);
+  });
+
+  test("assembleNewRoles matches rows stored with SQLite datetime format", async () => {
+    const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
+    const sourceId = await upsertJobSource(db, { provider: "test", externalId: "sqlite-dt", url: "https://test.com" });
+    const scanId = await createScan(db, "test", new Date().toISOString());
+
+    await seedJob(db, sourceId, scanId, { externalKey: "t:sqlite-dt", companyName: "SqliteTimeCo", score: 77 });
     db.prepare(`UPDATE jobs SET created_at = ?, updated_at = ?`).run("2026-03-26 08:56:32", "2026-03-26 08:56:32");
 
-    const roles = assembleNewRoles(db, new Set(), "2026-03-26");
+    const roles = await assembleNewRoles(db, new Set(), "2026-03-26");
 
     expect(roles).toHaveLength(1);
     expect(roles[0].company).toBe("SqliteTimeCo");
   });
 
-  test("getBriefingSmsSummary returns new role count and top score", () => {
-    const summary = getBriefingSmsSummary({
-      date: "2026-03-26",
-      applyNow: [],
-      newRoles: [
-        {
-          rank: 1,
-          score: 92,
-          company: "Anthropic",
-          role: "SWE II",
-          location: "San Francisco, CA",
-          whyItFits: "Strong fit",
-          topRisk: null,
-          applyLink: "https://example.com",
-          isProspect: true,
-          remoteFlag: false,
-          extractedSkills: [],
-          stackMatch: 0,
-          applicationStatus: null,
-        },
-        {
-          kind: "overflow" as const,
-          rank: null,
-          score: null,
-          company: "Anthropic",
-          role: "+2 more roles at Anthropic",
-          location: "",
-          whyItFits: "Similar roles hidden to keep the briefing readable",
-          topRisk: null,
-          applyLink: null,
-          isProspect: true,
-          remoteFlag: false,
-          extractedSkills: [],
-          stackMatch: 0,
-          applicationStatus: null,
-        },
-      ],
-      followups: [],
-      drafts: [],
-      funnel: null,
-      appliedCount: 0,
-      workflowCounts: {
-        saved: 0,
-        drafted: 0,
-        applied: 0,
-        interview: 0,
-      },
-      totalTracked: 0,
-      sourcesScanned: 0,
-    });
+  test("runBriefingCommand sends the HTML email and does not warn on success", async () => {
+    const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
+    const sourceId = await upsertJobSource(db, { provider: "test", externalId: "email-only", url: "https://test.com" });
+    const scanId = await createScan(db, "test", new Date().toISOString());
 
-    expect(summary).toEqual({ newRoleCount: 1, topScore: 92 });
+    await seedJob(db, sourceId, scanId, { externalKey: "t:email-only", companyName: "MailCo", score: 92 });
+    db.prepare(`UPDATE jobs SET created_at = ?, updated_at = ?`).run("2026-03-26T10:00:00.000Z", "2026-03-26T10:00:00.000Z");
+
+    const logSpy = jest.spyOn(console, "log").mockImplementation(() => {});
+    const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+    const emailSpy = jest.spyOn(gmailIntegration, "sendBriefingHtmlEmail").mockResolvedValue("msg-123");
+
+    await expect(runBriefingCommand({ scan: false, date: "2026-03-26" })).resolves.toBeUndefined();
+
+    expect(emailSpy).toHaveBeenCalled();
+    expect(warnSpy).not.toHaveBeenCalled();
+    expect(logSpy).toHaveBeenCalledWith("\n[briefing] Email sent (message ID: msg-123)");
   });
 });

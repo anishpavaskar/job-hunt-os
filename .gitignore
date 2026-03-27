@@ -6,8 +6,11 @@ data/outreach-batch.json
 data/outreach-batch.md
 .env
 .env.local
-node_modules
+node_modules/
 dist
+.next/
+out/
+tsconfig.tsbuildinfo
 litestream.yml
 credentials.json
 client_secret_*.json

@@ -15,6 +15,8 @@ function makeRole(overrides: Partial<BriefingNewRole> = {}): BriefingNewRole {
     applyLink: "https://anthropic.com/jobs/1",
     isProspect: false,
     remoteFlag: false,
+    discoveredDate: "2026-03-26",
+    postedDate: null,
     extractedSkills: ["Python", "TypeScript", "Kubernetes"],
     stackMatch: 7,
     applicationStatus: null,
@@ -115,6 +117,34 @@ describe("renderBriefingEmail", () => {
       expect(html).toContain("3 tracked roles");
       expect(html).toContain("2 above 70");
     });
+
+    it("counts grouped overflow roles in the tracked total", () => {
+      const roles = [
+        makeRole({ company: "Anthropic", score: 54 }),
+        makeRole({ company: "Anthropic", role: "Senior SWE", score: 50 }),
+        makeRole({
+          kind: "overflow",
+          rank: null,
+          score: null,
+          company: "Anthropic",
+          role: "+4 more roles at Anthropic",
+          location: "",
+          whyItFits: "Similar roles hidden to keep the briefing readable",
+          topRisk: null,
+          applyLink: null,
+          isProspect: true,
+          remoteFlag: false,
+          discoveredDate: "2026-03-26",
+          postedDate: null,
+          extractedSkills: [],
+          stackMatch: 0,
+          applicationStatus: null,
+        }),
+        makeRole({ company: "Figma", score: 50 }),
+      ];
+      const html = renderBriefingEmail(makeData({ newRoles: roles }));
+      expect(html).toContain("7 tracked roles");
+    });
   });
 
   describe("metric cards", () => {
@@ -165,7 +195,7 @@ describe("renderBriefingEmail", () => {
     });
   });
 
-  describe("tracked recently section", () => {
+  describe("best open tracked roles section", () => {
     it("renders each role's company and title", () => {
       const roles = [
         makeRole({ company: "Anthropic", role: "ML Infra Engineer" }),
@@ -245,6 +275,14 @@ describe("renderBriefingEmail", () => {
       expect(html).not.toContain("Redis");
     });
 
+    it("renders posted and tracked dates when available", () => {
+      const html = renderBriefingEmail(
+        makeData({ newRoles: [makeRole({ postedDate: "2026-03-12", discoveredDate: "2026-03-26" })] }),
+      );
+      expect(html).toContain("Posted 2026-03-12");
+      expect(html).toContain("Tracked 2026-03-26");
+    });
+
     it("renders apply link on the card", () => {
       const html = renderBriefingEmail(
         makeData({ newRoles: [makeRole({ applyLink: "https://example.com/apply" })] }),
@@ -285,7 +323,7 @@ describe("renderBriefingEmail", () => {
 
     it("shows empty state when no new roles", () => {
       const html = renderBriefingEmail(makeData({ newRoles: [] }));
-      expect(html).toContain("No tracked roles scored above 50 in the last 14 days.");
+      expect(html).toContain("No tracked open roles scored above 50 right now.");
     });
   });
 

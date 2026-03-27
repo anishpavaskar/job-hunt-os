@@ -1,5 +1,5 @@
 import { google } from "googleapis";
-import { countVisibleNewRoles } from "../briefing/types";
+import { countActualNewRoles } from "../briefing/types";
 import type { BriefingData } from "../briefing/types";
 import { renderBriefingEmail } from "../templates/briefing-email";
 
@@ -120,8 +120,7 @@ export function buildBriefingEmailSubject(data: Pick<BriefingData, "date" | "new
     day: "numeric",
     year: "numeric",
   });
-  const visibleRoles = data.newRoles.filter((role) => role.kind !== "overflow");
-  return `Job Hunt OS — ${formatted} — ${visibleRoles.length} tracked roles`;
+  return `Job Hunt OS — ${formatted} — ${countActualNewRoles(data.newRoles)} tracked roles`;
 }
 
 export async function sendBriefingHtmlEmail(data: BriefingData): Promise<string> {

@@ -14,7 +14,9 @@ import { registerScanCommand } from "./commands/scan";
 import { registerStatsCommand } from "./commands/stats";
 import { registerTodayCommand } from "./commands/today";
 import { registerBriefingCommand } from "./commands/briefing";
+import { registerBrowseCommand } from "./commands/browse";
 import { registerScanCareersCommand } from "./commands/scan-careers";
+import { registerBaselineBootstrapCommand } from "./commands/baseline-bootstrap";
 
 dotenv.config();
 
@@ -29,6 +31,7 @@ program.addCommand(registerImportCommand());
 program.addCommand(registerNotifyCommand());
 program.addCommand(registerProspectRefreshCommand());
 program.addCommand(registerReviewCommand());
+program.addCommand(registerBrowseCommand());
 program.addCommand(registerTodayCommand());
 program.addCommand(registerStatsCommand());
 program.addCommand(registerAutoDraftCommand());
@@ -39,6 +42,7 @@ program.addCommand(registerFollowupsCommand());
 program.addCommand(registerProfileCommand());
 program.addCommand(registerBriefingCommand());
 program.addCommand(registerScanCareersCommand());
+program.addCommand(registerBaselineBootstrapCommand());
 
 program.parseAsync(process.argv).catch((err) => {
   console.error(`[job-hunt-os] Fatal: ${err instanceof Error ? err.message : String(err)}`);

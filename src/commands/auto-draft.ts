@@ -11,9 +11,9 @@ export async function runAutoDraftCommand(
     fetchImpl?: typeof fetch;
   } = {},
 ): Promise<{ generated: number; gmailCreated: number; skipped: number }> {
-  const db = initDb();
+  const db = await initDb();
   const minScore = opts.minScore ?? 80;
-  const jobs = listAutoDraftJobs(db, minScore);
+  const jobs = await listAutoDraftJobs(db, minScore);
 
   let generated = 0;
   let gmailCreated = 0;

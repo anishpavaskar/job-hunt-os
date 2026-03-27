@@ -4,6 +4,21 @@ import { listJobs } from "../db/repositories";
 import { JobRecord } from "../db/types";
 import { buildReviewFilters } from "../filter/jobs";
 
+function stripHtml(value: string): string {
+  return value
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&mdash;/g, "-")
+    .replace(/&amp;/g, "&")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function compactSummary(value: string): string {
+  const cleaned = stripHtml(value);
+  return cleaned.length > 140 ? `${cleaned.slice(0, 137)}...` : cleaned;
+}
+
 function recommendedNextAction(job: JobRecord, risk: string): string {
   switch (job.status) {
     case "new":
@@ -36,30 +51,32 @@ export function runReviewCommand(opts: {
   remote?: boolean;
   today?: boolean;
   limit?: string;
-}): string[] {
-  const db = initDb();
-  const filters = buildReviewFilters(opts);
-  const jobs = listJobs(db, filters);
-  return jobs.map((job, index) => {
-    const breakdown = JSON.parse(job.score_breakdown_json) as Record<string, number>;
-    const positivesList = (JSON.parse(job.explanation_bullets_json) as string[]).slice(0, 2);
-    const risk = (JSON.parse(job.risk_bullets_json) as string[])[0] ?? "No major risk surfaced";
-    const title = job.title ? ` - ${job.title}` : "";
-    const remote = job.remote_flag ? " | remote" : "";
-    const seniority = job.seniority_hint ? ` | ${job.seniority_hint}` : "";
-    const skills = (JSON.parse(job.extracted_skills_json) as string[]).slice(0, 4).join(", ");
-    const compensation =
-      job.compensation_min != null || job.compensation_max != null
-        ? ` | comp ${job.compensation_currency ?? ""} ${job.compensation_min ?? "?"}-${job.compensation_max ?? "?"}${job.compensation_period ? `/${job.compensation_period}` : ""}`.replace(/\s+/g, " ").trim()
-        : "";
-    const header = `#${index + 1} [${job.score}] ${job.company_name}${title} | ${job.summary}${remote}${seniority}${compensation ? ` | ${compensation}` : ""}`;
-    const scoreLine = `  fit: role ${breakdown.roleFit ?? 0}, stack ${breakdown.stackFit ?? 0}, seniority ${breakdown.seniorityFit ?? 0}, freshness ${breakdown.freshness ?? 0}, company ${breakdown.companySignal ?? 0}`;
-    const positiveLine = `  top reasons: ${positivesList.join("; ") || "No clear positives recorded"}`;
-    const riskLine = `  top risk: ${risk}`;
-    const skillsLine = skills ? `  skills: ${skills}` : null;
-    const actionLine = `  next action: ${recommendedNextAction(job, risk)}`;
-    return [header, scoreLine, positiveLine, riskLine, skillsLine, actionLine].filter(Boolean).join("\n");
-  });
+}): Promise<string[]> {
+  return (async () => {
+    const db = await initDb();
+    const filters = buildReviewFilters(opts);
+    const jobs = await listJobs(db, filters);
+    return jobs.map((job, index) => {
+      const breakdown = job.score_breakdown_json;
+      const positivesList = job.explanation_bullets_json.slice(0, 2);
+      const risk = job.risk_bullets_json[0] ?? "No major risk surfaced";
+      const title = job.title ? ` - ${job.title}` : "";
+      const remote = job.remote_flag ? " | remote" : "";
+      const seniority = job.seniority_hint ? ` | ${job.seniority_hint}` : "";
+      const skills = job.extracted_skills_json.slice(0, 4).join(", ");
+      const compensation =
+        job.compensation_min != null || job.compensation_max != null
+          ? ` | comp ${job.compensation_currency ?? ""} ${job.compensation_min ?? "?"}-${job.compensation_max ?? "?"}${job.compensation_period ? `/${job.compensation_period}` : ""}`.replace(/\s+/g, " ").trim()
+          : "";
+      const header = `#${index + 1} [${job.score}] ${job.company_name}${title} | ${compactSummary(job.summary)}${remote}${seniority}${compensation ? ` | ${compensation}` : ""}`;
+      const scoreLine = `  fit: role ${breakdown.roleFit ?? 0}, stack ${breakdown.stackFit ?? 0}, seniority ${breakdown.seniorityFit ?? 0}, freshness ${breakdown.freshness ?? 0}, company ${breakdown.companySignal ?? 0}`;
+      const positiveLine = `  top reasons: ${positivesList.join("; ") || "No clear positives recorded"}`;
+      const riskLine = `  top risk: ${risk}`;
+      const skillsLine = skills ? `  skills: ${skills}` : null;
+      const actionLine = `  next action: ${recommendedNextAction(job, risk)}`;
+      return [header, scoreLine, positiveLine, riskLine, skillsLine, actionLine].filter(Boolean).join("\n");
+    });
+  })();
 }
 
 export function registerReviewCommand(): Command {
@@ -71,8 +88,8 @@ export function registerReviewCommand(): Command {
     .option("--remote", "remote-only jobs")
     .option("--today", "show the best jobs to apply to today")
     .option("--limit <number>", "max jobs to show", "20")
-    .action((opts) => {
-      const lines = runReviewCommand(opts);
+    .action(async (opts) => {
+      const lines = await runReviewCommand(opts);
       if (lines.length === 0) {
         console.log("No jobs matched your filters.");
         return;

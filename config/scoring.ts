@@ -82,6 +82,8 @@ export const SCORING_WEIGHTS = {
   roleFit: 25,
   stackFit: 30,
   seniorityFit: 15,
+  // Freshness combines up to 7 points from YC batch recency, or postedAt recency
+  // (<=3 days: 7, <=7 days: 5, <=14 days: 3, <=30 days: 1), plus 3 for active hiring.
   freshness: 10,
   companySignal: 20,
   prospectBoost: 8,
@@ -109,6 +111,49 @@ export const ROLE_KEYWORDS = {
   data: ["data", "pipeline", "analytics", "etl"],
   ai: ["ai", "machine learning", "ml", "llm", "rag"],
 } as const;
+
+export const STRONG_MISMATCH_TITLE_KEYWORDS = [
+  "engagement manager",
+  "program manager",
+  "product manager",
+  "technical account",
+  "account management",
+  "solutions architect",
+  "pre-sales",
+  "presales",
+  "implementation manager",
+  "implementation consultant",
+  "sales development representative",
+  "customer success",
+  "configuration analyst",
+  "corporate development",
+  "finops",
+  "analyst",
+  "recruiter",
+  "partnerships",
+] as const;
+
+export const MODERATE_MISMATCH_TITLE_KEYWORDS = [
+  "manager",
+  "architect",
+  "consultant",
+  "operations",
+] as const;
+
+export const IC_TITLE_KEYWORDS = [
+  "engineer",
+  "engineering",
+  "developer",
+  "devops",
+  "sre",
+  "reliability",
+  "platform",
+  "backend",
+  "infrastructure",
+  "distributed systems",
+  "software",
+  "data engineer",
+] as const;
 
 export const SENIORITY_KEYWORDS = {
   junior: ["junior", "entry", "new grad", "associate"],

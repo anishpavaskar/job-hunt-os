@@ -25,15 +25,15 @@ export async function runApplyCommand(
     lastContactedAt?: string | null;
   } = {},
 ): Promise<{ companyName: string; dueAt: string | null }> {
-  const db = initDb();
-  const job = getJobByQuery(db, query);
+  const db = await initDb();
+  const job = await getJobByQuery(db, query);
   if (!job) {
-    throw new Error(`No job matching "${query}" found in SQLite. Run scan first.`);
+    throw new Error(`No job matching "${query}" found in Supabase. Run scan first.`);
   }
 
   const appliedAt = new Date().toISOString();
   const status = opts.status ?? "applied";
-  const applicationId = upsertApplication(db, job.id, {
+  const applicationId = await upsertApplication(db, job.id, {
     status,
     appliedAt: status === "applied" ? appliedAt : null,
     note: opts.notes,
@@ -49,7 +49,7 @@ export async function runApplyCommand(
   let dueAt: string | null = null;
   if (status === "applied" || status === "followup_due") {
     dueAt = addDaysIso(followupDays);
-    createFollowup(db, job.id, applicationId, dueAt, `Follow up with ${job.company_name}`);
+    await createFollowup(db, job.id, applicationId, dueAt, `Follow up with ${job.company_name}`);
   }
 
   return { companyName: job.title ? `${job.company_name} - ${job.title}` : job.company_name, dueAt };

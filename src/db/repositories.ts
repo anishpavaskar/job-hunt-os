@@ -1,10 +1,19 @@
-import Database from "better-sqlite3";
-import { TODAY_RANKING } from "../../config/scoring";
+import {
+  IC_TITLE_KEYWORDS,
+  MODERATE_MISMATCH_TITLE_KEYWORDS,
+  STRONG_MISMATCH_TITLE_KEYWORDS,
+  TODAY_RANKING,
+} from "../../config/scoring";
+import { rerankItemsWithAnthropic } from "../ai/anthropic-rerank";
 import {
   ApplicationEventRecord,
   ApplicationRecord,
-  ApplicationUpdateInput,
   ApplicationStatus,
+  ApplicationUpdateInput,
+  BaselineSnapshotRecord,
+  BrowseFilters,
+  BrowseJobRecord,
+  ConversionStats,
   DraftRecord,
   DraftUpsertInput,
   FollowupRecord,
@@ -15,18 +24,114 @@ import {
   JobStatus,
   JobUpsertInput,
   NextActionRecord,
+  ReviewFilters,
+  ScoreBreakdown,
   ScoreRangeStats,
   SourceStats,
-  ConversionStats,
-  ReviewFilters,
 } from "./types";
+import type { DbClient } from "./client";
 
-function json(value: string[]): string {
-  return JSON.stringify(value);
+type DbRow = Record<string, any>;
+type StatusRow = { status: ApplicationStatus };
+const EXTERNAL_KEY_QUERY_FALLBACK_BATCH_SIZE = 25;
+const JOB_PAGE_SIZE = 1000;
+
+function normalizeTitle(title?: string | null): string {
+  return (title ?? "").toLowerCase().trim();
 }
 
-function jsonObject(value?: unknown): string {
-  return JSON.stringify(value ?? {});
+function mapJobToAnthropicCandidate(job: JobRecord) {
+  return {
+    id: job.id,
+    company: job.company_name,
+    title: job.title,
+    summary: job.summary,
+    locations: job.locations,
+    remoteFlag: job.remote_flag,
+    postedAt: job.posted_at,
+    score: job.score,
+    scoreBreakdown: job.score_breakdown_json,
+    extractedSkills: job.extracted_skills_json,
+    explanationBullets: job.explanation_bullets_json,
+    riskBullets: job.risk_bullets_json,
+    status: job.status,
+    roleSource: job.role_source,
+  };
+}
+
+function mapActionToAnthropicCandidate(action: NextActionRecord) {
+  return {
+    id: action.jobId,
+    company: action.companyName,
+    title: action.title,
+    summary: action.summary,
+    locations: action.locations,
+    remoteFlag: action.remoteFlag,
+    score: action.score,
+    scoreBreakdown: action.scoreBreakdown,
+    extractedSkills: action.extractedSkills,
+    explanationBullets: action.whyMatch,
+    riskBullets: action.risk ? [action.risk] : [],
+    status: action.status,
+    roleSource: "role",
+  };
+}
+
+function hasKeyword(text: string, keywords: readonly string[]): boolean {
+  return keywords.some((keyword) => text.includes(keyword.toLowerCase()));
+}
+
+function isLikelyICTitle(title?: string | null): boolean {
+  const normalized = normalizeTitle(title);
+  return normalized.length > 0 && hasKeyword(normalized, IC_TITLE_KEYWORDS);
+}
+
+function isStrongTitleMismatch(title?: string | null): boolean {
+  const normalized = normalizeTitle(title);
+  if (!normalized) return false;
+  return hasKeyword(normalized, STRONG_MISMATCH_TITLE_KEYWORDS) && !isLikelyICTitle(normalized);
+}
+
+function titleRankingPenalty(title?: string | null): number {
+  const normalized = normalizeTitle(title);
+  if (!normalized) return 0;
+
+  if (isStrongTitleMismatch(normalized)) return 45;
+
+  let penalty = 0;
+  if (hasKeyword(normalized, MODERATE_MISMATCH_TITLE_KEYWORDS) && !isLikelyICTitle(normalized)) {
+    penalty += 20;
+  }
+  if (normalized.includes("engineering manager")) penalty += 18;
+  if (normalized.includes("manager")) penalty += 10;
+  return penalty;
+}
+
+function asArray(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map(String).filter(Boolean);
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed.map(String).filter(Boolean) : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function asObject<T>(value: unknown, fallback: T): T {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as T;
+  }
+  if (typeof value === "string") {
+    try {
+      return JSON.parse(value) as T;
+    } catch {
+      return fallback;
+    }
+  }
+  return fallback;
 }
 
 function maybeJobStatus(status: ApplicationStatus): JobStatus {
@@ -46,374 +151,683 @@ function maybeJobStatus(status: ApplicationStatus): JobStatus {
   }
 }
 
-export function createScan(
-  db: Database.Database,
+function assertNoError<T>(error: { message: string } | null, context: string, data?: T | null): T {
+  if (error) {
+    throw new Error(`${context}: ${error.message}`);
+  }
+  if (data == null) {
+    throw new Error(`${context}: empty response`);
+  }
+  return data;
+}
+
+function chunk<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    out.push(items.slice(i, i + size));
+  }
+  return out;
+}
+
+function mapJobUpsertInput(input: JobUpsertInput): Record<string, unknown> {
+  const row: Record<string, unknown> = {
+    source_id: input.sourceId,
+    scan_id: input.scanId,
+    external_key: input.externalKey,
+    role_external_id: input.roleExternalId ?? null,
+    role_source: input.roleSource,
+    company_name: input.companyName,
+    title: input.title ?? null,
+    summary: input.summary,
+    website: input.website,
+    locations: input.locations,
+    remote_flag: input.remoteFlag ?? false,
+    job_url: input.jobUrl,
+    regions_json: input.regions,
+    tags_json: input.tags,
+    industries_json: input.industries,
+    stage: input.stage,
+    batch: input.batch,
+    team_size: input.teamSize ?? null,
+    seniority_hint: input.seniorityHint ?? null,
+    compensation_min: input.compensationMin ?? null,
+    compensation_max: input.compensationMax ?? null,
+    compensation_currency: input.compensationCurrency ?? null,
+    compensation_period: input.compensationPeriod ?? null,
+    extracted_skills_json: input.extractedSkills ?? [],
+    top_company: input.topCompany,
+    is_hiring: input.isHiring,
+    score: input.score,
+    score_reasons_json: input.scoreReasons,
+    score_breakdown_json: input.scoreBreakdown,
+    explanation_bullets_json: input.explanationBullets,
+    risk_bullets_json: input.riskBullets,
+    status: input.status ?? "new",
+    updated_at: new Date().toISOString(),
+  };
+
+  if (input.postedAt) {
+    row.posted_at = input.postedAt;
+  }
+
+  return row;
+}
+
+function normalizeJobRow(row: Record<string, any>): JobRecord {
+  const source = Array.isArray(row.job_sources) ? row.job_sources[0] : row.job_sources ?? {};
+  return {
+    id: row.id,
+    source_id: row.source_id,
+    scan_id: row.scan_id,
+    external_key: row.external_key,
+    role_external_id: row.role_external_id ?? null,
+    role_source: row.role_source,
+    company_name: row.company_name,
+    external_id: row.external_id ?? source.external_id ?? "",
+    source_url: row.source_url ?? source.url ?? "",
+    provider: row.provider ?? source.provider ?? undefined,
+    title: row.title ?? null,
+    summary: row.summary,
+    website: row.website,
+    locations: row.locations,
+    remote_flag: Boolean(row.remote_flag),
+    job_url: row.job_url,
+    posted_at: row.posted_at ?? null,
+    regions_json: asArray(row.regions_json),
+    tags_json: asArray(row.tags_json),
+    industries_json: asArray(row.industries_json),
+    stage: row.stage,
+    batch: row.batch,
+    team_size: row.team_size ?? null,
+    seniority_hint: row.seniority_hint ?? null,
+    compensation_min: row.compensation_min ?? null,
+    compensation_max: row.compensation_max ?? null,
+    compensation_currency: row.compensation_currency ?? null,
+    compensation_period: row.compensation_period ?? null,
+    extracted_skills_json: asArray(row.extracted_skills_json),
+    top_company: Boolean(row.top_company),
+    is_hiring: Boolean(row.is_hiring),
+    score: row.score,
+    score_reasons_json: asArray(row.score_reasons_json),
+    score_breakdown_json: asObject<ScoreBreakdown>(row.score_breakdown_json, {
+      roleFit: 0,
+      stackFit: 0,
+      seniorityFit: 0,
+      freshness: 0,
+      companySignal: 0,
+    }),
+    explanation_bullets_json: asArray(row.explanation_bullets_json),
+    risk_bullets_json: asArray(row.risk_bullets_json),
+    status: row.status,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    application_status: row.application_status ?? null,
+  };
+}
+
+function normalizeDraftRow(row: Record<string, any>): DraftRecord {
+  const job = Array.isArray(row.jobs) ? row.jobs[0] : row.jobs ?? {};
+  const application = Array.isArray(row.applications) ? row.applications[0] : row.applications ?? {};
+  return {
+    id: row.id,
+    job_id: row.job_id,
+    application_id: row.application_id ?? null,
+    variant: row.variant,
+    generated_content: row.generated_content,
+    edited_content: row.edited_content ?? null,
+    gmail_draft_id: row.gmail_draft_id ?? null,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    company_name: row.company_name ?? job.company_name,
+    title: row.title ?? job.title ?? null,
+    application_status: row.application_status ?? application.status ?? null,
+  };
+}
+
+function normalizeApplicationRow(row: Record<string, any>): ApplicationRecord {
+  return {
+    id: row.id,
+    job_id: row.job_id,
+    applied_at: row.applied_at ?? null,
+    status: row.status,
+    notes: row.notes ?? null,
+    applied_url: row.applied_url ?? null,
+    resume_version: row.resume_version ?? null,
+    outreach_draft_version: row.outreach_draft_version ?? null,
+    response_received: Boolean(row.response_received),
+    response_type: row.response_type ?? null,
+    interview_stage: row.interview_stage ?? null,
+    rejection_reason: row.rejection_reason ?? null,
+    last_contacted_at: row.last_contacted_at ?? null,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+function normalizeEventRow(row: Record<string, any>): ApplicationEventRecord {
+  return {
+    id: row.id,
+    application_id: row.application_id,
+    event_type: row.event_type,
+    previous_status: row.previous_status ?? null,
+    next_status: row.next_status ?? null,
+    note: row.note ?? null,
+    metadata_json: asObject(row.metadata_json, {}),
+    created_at: row.created_at,
+  };
+}
+
+function normalizeFollowupRow(row: Record<string, any>): FollowupRecord {
+  const job = Array.isArray(row.jobs) ? row.jobs[0] : row.jobs ?? {};
+  return {
+    id: row.id,
+    job_id: row.job_id,
+    application_id: row.application_id ?? null,
+    due_at: row.due_at,
+    status: row.status,
+    note: row.note ?? null,
+    company_name: row.company_name ?? job.company_name,
+    website: row.website ?? job.website,
+    title: row.title ?? job.title ?? null,
+  };
+}
+
+async function fetchJobsWithSource(db: DbClient): Promise<JobRecord[]> {
+  const rows: DbRow[] = [];
+  let from = 0;
+
+  while (true) {
+    const to = from + JOB_PAGE_SIZE - 1;
+    const { data, error } = await db
+      .from("jobs")
+      .select("*, job_sources!inner(provider, external_id, url)")
+      .order("id", { ascending: true })
+      .range(from, to);
+    const page = assertNoError(error, "fetch jobs", data) as DbRow[];
+    rows.push(...page);
+    if (page.length < JOB_PAGE_SIZE) break;
+    from += JOB_PAGE_SIZE;
+  }
+
+  return rows.map((row: DbRow) => normalizeJobRow(row));
+}
+
+export async function createScan(
+  db: DbClient,
   provider: string,
   startedAt: string,
   sourceCounts?: unknown,
-): number {
-  const result = db
-    .prepare(
-      `INSERT INTO scans (provider, started_at, raw_count, valid_count, source_counts_json)
-       VALUES (?, ?, 0, 0, ?)`,
-    )
-    .run(provider, startedAt, jsonObject(sourceCounts));
-  return Number(result.lastInsertRowid);
+): Promise<number> {
+  const { data, error } = await db
+    .from("scans")
+    .insert({
+      provider,
+      started_at: startedAt,
+      raw_count: 0,
+      valid_count: 0,
+      source_counts_json: sourceCounts ?? {},
+    })
+    .select("id")
+    .single();
+  return assertNoError(error, "create scan", data).id;
 }
 
-export function completeScan(
-  db: Database.Database,
+export async function completeScan(
+  db: DbClient,
   scanId: number,
   rawCount: number,
   validCount: number,
   completedAt: string,
   sourceCounts?: unknown,
-): void {
-  db.prepare(
-    `UPDATE scans
-     SET raw_count = ?, valid_count = ?, completed_at = ?, source_counts_json = ?
-     WHERE id = ?`,
-  ).run(rawCount, validCount, completedAt, jsonObject(sourceCounts), scanId);
+): Promise<void> {
+  const { error } = await db
+    .from("scans")
+    .update({
+      raw_count: rawCount,
+      valid_count: validCount,
+      completed_at: completedAt,
+      source_counts_json: sourceCounts ?? {},
+    })
+    .eq("id", scanId);
+  assertNoError(error, "complete scan", {});
 }
 
-export function getExistingJobExternalKeys(
-  db: Database.Database,
+export async function getExistingJobExternalKeys(
+  db: DbClient,
   externalKeys: string[],
-): Set<string> {
+): Promise<Set<string>> {
   const matches = new Set<string>();
   const uniqueKeys = [...new Set(externalKeys)];
-  const chunkSize = 400;
 
-  for (let index = 0; index < uniqueKeys.length; index += chunkSize) {
-    const chunk = uniqueKeys.slice(index, index + chunkSize);
-    if (chunk.length === 0) continue;
-    const placeholders = chunk.map(() => "?").join(", ");
-    const rows = db
-      .prepare(`SELECT external_key FROM jobs WHERE external_key IN (${placeholders})`)
-      .all(...chunk) as Array<{ external_key: string }>;
-    rows.forEach((row) => matches.add(row.external_key));
+  const loadChunk = async (part: string[]): Promise<void> => {
+    if (part.length === 0) return;
+    try {
+      const { data, error } = await db.from("jobs").select("external_key").in("external_key", part);
+      const rows = assertNoError(error, "get existing job keys", data) as DbRow[];
+      rows.forEach((row: DbRow) => matches.add(String(row.external_key)));
+    } catch (error) {
+      if (part.length <= EXTERNAL_KEY_QUERY_FALLBACK_BATCH_SIZE) {
+        throw error;
+      }
+
+      const midpoint = Math.ceil(part.length / 2);
+      await loadChunk(part.slice(0, midpoint));
+      await loadChunk(part.slice(midpoint));
+    }
+  };
+
+  for (const part of chunk(uniqueKeys, 100)) {
+    await loadChunk(part);
   }
-
   return matches;
 }
 
-export function upsertJobSource(
-  db: Database.Database,
+export async function upsertJobSource(
+  db: DbClient,
   input: JobSourceInput,
-): number {
-  db.prepare(
-    `INSERT INTO job_sources (provider, external_id, url, updated_at)
-     VALUES (?, ?, ?, datetime('now'))
-     ON CONFLICT(provider, external_id)
-     DO UPDATE SET url = excluded.url, updated_at = datetime('now')`,
-  ).run(input.provider, input.externalId, input.url);
-
-  const row = db
-    .prepare(
-      `SELECT id FROM job_sources
-       WHERE provider = ? AND external_id = ?`,
+): Promise<number> {
+  const { data, error } = await db
+    .from("job_sources")
+    .upsert(
+      {
+        provider: input.provider,
+        external_id: input.externalId,
+        url: input.url,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "provider,external_id" },
     )
-    .get(input.provider, input.externalId) as { id: number };
-  return row.id;
+    .select("id")
+    .single();
+  return assertNoError(error, "upsert job source", data).id;
 }
 
-export function upsertJob(
-  db: Database.Database,
+export async function getBaselineSnapshotByLabel(
+  db: DbClient,
+  label: string,
+): Promise<BaselineSnapshotRecord | undefined> {
+  const { data, error } = await db
+    .from("baseline_snapshots")
+    .select("*")
+    .eq("label", label)
+    .maybeSingle();
+  if (error) throw new Error(`get baseline snapshot: ${error.message}`);
+  return data as BaselineSnapshotRecord | undefined;
+}
+
+export async function createBaselineSnapshot(
+  db: DbClient,
+  label: string,
+  effectiveDate: string,
+): Promise<number> {
+  const { data, error } = await db
+    .from("baseline_snapshots")
+    .insert({ label, effective_date: effectiveDate })
+    .select("id")
+    .single();
+  return assertNoError(error, "create baseline snapshot", data).id;
+}
+
+export async function deleteBaselineSnapshot(
+  db: DbClient,
+  baselineId: number,
+): Promise<void> {
+  const { error } = await db.from("baseline_snapshots").delete().eq("id", baselineId);
+  assertNoError(error, "delete baseline snapshot", {});
+}
+
+export async function snapshotJobsIntoBaseline(
+  db: DbClient,
+  baselineId: number,
+  opts: {
+    includeFallback?: boolean;
+    minScore?: number;
+  } = {},
+): Promise<number> {
+  const includeFallback = opts.includeFallback ?? false;
+  const minScore = opts.minScore ?? 0;
+  const rows = (await fetchJobsWithSource(db))
+    .filter((job) => job.score >= minScore)
+    .filter((job) => includeFallback || job.role_source !== "company_fallback")
+    .filter((job) => ["new", "reviewed", "saved", "shortlisted", "drafted", "applied", "followup_due", "replied", "interview"].includes(job.status))
+    .sort((a, b) => b.score - a.score || a.company_name.localeCompare(b.company_name) || (a.title ?? "").localeCompare(b.title ?? ""));
+
+  if (rows.length === 0) return 0;
+
+  const payload = rows.map((row) => ({
+    baseline_id: baselineId,
+    job_id: row.id,
+    score_snapshot: row.score,
+    status_snapshot: row.status,
+    role_source_snapshot: row.role_source,
+    posted_at_snapshot: row.posted_at,
+    discovered_at_snapshot: row.created_at,
+  }));
+
+  for (const part of chunk(payload, 500)) {
+    const { error } = await db.from("baseline_jobs").insert(part);
+    assertNoError(error, "snapshot jobs into baseline", {});
+  }
+
+  return rows.length;
+}
+
+export async function upsertJob(
+  db: DbClient,
   input: JobUpsertInput,
-): number {
-  db.prepare(
-     `INSERT INTO jobs (
-       source_id, scan_id, external_key, role_external_id, role_source, company_name, title, summary, website, locations,
-       remote_flag, job_url, regions_json, tags_json, industries_json, stage, batch, team_size,
-       seniority_hint, compensation_min, compensation_max, compensation_currency, compensation_period, extracted_skills_json,
-       top_company, is_hiring, score, score_reasons_json, score_breakdown_json, explanation_bullets_json, risk_bullets_json, status, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-     ON CONFLICT(external_key) DO UPDATE SET
-       scan_id = excluded.scan_id,
-       role_external_id = excluded.role_external_id,
-       role_source = excluded.role_source,
-       company_name = excluded.company_name,
-       title = excluded.title,
-       summary = excluded.summary,
-       website = excluded.website,
-       locations = excluded.locations,
-       remote_flag = excluded.remote_flag,
-       job_url = excluded.job_url,
-       regions_json = excluded.regions_json,
-       tags_json = excluded.tags_json,
-       industries_json = excluded.industries_json,
-       stage = excluded.stage,
-       batch = excluded.batch,
-       team_size = excluded.team_size,
-       seniority_hint = excluded.seniority_hint,
-       compensation_min = excluded.compensation_min,
-       compensation_max = excluded.compensation_max,
-       compensation_currency = excluded.compensation_currency,
-       compensation_period = excluded.compensation_period,
-       extracted_skills_json = excluded.extracted_skills_json,
-       top_company = excluded.top_company,
-       is_hiring = excluded.is_hiring,
-       score = excluded.score,
-       score_reasons_json = excluded.score_reasons_json,
-       score_breakdown_json = excluded.score_breakdown_json,
-       explanation_bullets_json = excluded.explanation_bullets_json,
-       risk_bullets_json = excluded.risk_bullets_json,
-       updated_at = datetime('now')`,
-  ).run(
-    input.sourceId,
-    input.scanId,
-    input.externalKey,
-    input.roleExternalId ?? null,
-    input.roleSource,
-    input.companyName,
-    input.title ?? null,
-    input.summary,
-    input.website,
-    input.locations,
-    input.remoteFlag ? 1 : 0,
-    input.jobUrl,
-    json(input.regions),
-    json(input.tags),
-    json(input.industries),
-    input.stage,
-    input.batch,
-    input.teamSize ?? null,
-    input.seniorityHint ?? null,
-    input.compensationMin ?? null,
-    input.compensationMax ?? null,
-    input.compensationCurrency ?? null,
-    input.compensationPeriod ?? null,
-    json(input.extractedSkills ?? []),
-    input.topCompany ? 1 : 0,
-    input.isHiring ? 1 : 0,
-    input.score,
-    json(input.scoreReasons),
-    JSON.stringify(input.scoreBreakdown),
-    json(input.explanationBullets),
-    json(input.riskBullets),
-    input.status ?? "new",
-  );
-
-  const row = db
-    .prepare(`SELECT id FROM jobs WHERE external_key = ?`)
-    .get(input.externalKey) as { id: number };
-  return row.id;
+): Promise<number> {
+  const { data, error } = await db
+    .from("jobs")
+    .upsert(mapJobUpsertInput(input), { onConflict: "external_key" })
+    .select("id")
+    .single();
+  return assertNoError(error, "upsert job", data).id;
 }
 
-export function listJobs(
-  db: Database.Database,
+export async function upsertJobsBatch(
+  db: DbClient,
+  inputs: JobUpsertInput[],
+): Promise<void> {
+  for (const part of chunk(inputs, inputs.length > 1000 ? 500 : inputs.length || 1)) {
+    if (part.length === 0) continue;
+    const { error } = await db
+      .from("jobs")
+      .upsert(part.map(mapJobUpsertInput), { onConflict: "external_key" });
+    assertNoError(error, "batch upsert jobs", {});
+  }
+}
+
+export async function listJobs(
+  db: DbClient,
   filters: ReviewFilters,
-): JobRecord[] {
-  const clauses: string[] = [];
-  const params: Array<string | number> = [];
+): Promise<JobRecord[]> {
+  let jobs = await fetchJobsWithSource(db);
 
   if (filters.query) {
-    clauses.push(
-      `(company_name LIKE ? OR COALESCE(title, '') LIKE ? OR summary LIKE ? OR tags_json LIKE ? OR industries_json LIKE ?)`,
+    const q = filters.query.toLowerCase();
+    jobs = jobs.filter((job) =>
+      job.company_name.toLowerCase().includes(q)
+      || (job.title ?? "").toLowerCase().includes(q)
+      || job.summary.toLowerCase().includes(q)
+      || job.tags_json.some((tag) => tag.toLowerCase().includes(q))
+      || job.industries_json.some((industry) => industry.toLowerCase().includes(q)),
     );
-    const q = `%${filters.query}%`;
-    params.push(q, q, q, q, q);
   }
   if (filters.minScore != null) {
-    clauses.push(`score >= ?`);
-    params.push(filters.minScore);
+    jobs = jobs.filter((job) => job.score >= filters.minScore!);
   }
   if (filters.status) {
-    clauses.push(`status = ?`);
-    params.push(filters.status);
+    jobs = jobs.filter((job) => job.status === filters.status);
   }
   if (filters.remoteOnly) {
-    clauses.push(`remote_flag = 1`);
+    jobs = jobs.filter((job) => job.remote_flag);
   }
   if (filters.todayOnly) {
-    clauses.push(`status IN ('new', 'reviewed', 'saved', 'shortlisted', 'drafted')`);
+    jobs = jobs.filter((job) => ["new", "reviewed", "saved", "shortlisted", "drafted"].includes(job.status));
   }
 
-  const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
   const limit = filters.limit ?? 20;
+  const sortedJobs = jobs
+    .sort((left, right) => {
+      const fallbackDiff = (left.role_source === "company_fallback" ? 1 : 0) - (right.role_source === "company_fallback" ? 1 : 0);
+      if (fallbackDiff !== 0) return fallbackDiff;
 
-  return db
-    .prepare(
-      `SELECT jobs.*, job_sources.external_id, job_sources.url AS source_url
-       FROM jobs
-       JOIN job_sources ON job_sources.id = jobs.source_id
-       ${where}
-       ORDER BY
-         CASE WHEN role_source != 'company_fallback' THEN 0 ELSE 1 END ASC,
-         CASE WHEN ? = 1 THEN
-           score
-           + CASE WHEN remote_flag = 1 THEN 5 ELSE 0 END
-           + CASE WHEN compensation_min IS NOT NULL OR compensation_max IS NOT NULL THEN 4 ELSE 0 END
-           + CASE WHEN risk_bullets_json = '[]' THEN 3 ELSE 0 END
-         - CASE WHEN status = 'reviewed' THEN 2 ELSE 0 END
-         ELSE score END DESC,
-         score DESC,
-         CASE WHEN title IS NULL THEN 1 ELSE 0 END ASC,
-         company_name ASC,
-         title ASC
-       LIMIT ?`,
-    )
-    .all(...params, filters.todayOnly ? 1 : 0, limit) as JobRecord[];
-}
+      const leftPenalty = titleRankingPenalty(left.title);
+      const rightPenalty = titleRankingPenalty(right.title);
+      const leftTodayRank = filters.todayOnly
+        ? left.score - leftPenalty + (left.remote_flag ? 5 : 0) + ((left.compensation_min != null || left.compensation_max != null) ? 4 : 0) + (left.risk_bullets_json.length === 0 ? 3 : 0) - (left.status === "reviewed" ? 2 : 0)
+        : left.score - leftPenalty;
+      const rightTodayRank = filters.todayOnly
+        ? right.score - rightPenalty + (right.remote_flag ? 5 : 0) + ((right.compensation_min != null || right.compensation_max != null) ? 4 : 0) + (right.risk_bullets_json.length === 0 ? 3 : 0) - (right.status === "reviewed" ? 2 : 0)
+        : right.score - rightPenalty;
+      if (rightTodayRank !== leftTodayRank) return rightTodayRank - leftTodayRank;
+      if (right.score !== left.score) return right.score - left.score;
+      const titleNullDiff = (left.title == null ? 1 : 0) - (right.title == null ? 1 : 0);
+      if (titleNullDiff !== 0) return titleNullDiff;
+      return left.company_name.localeCompare(right.company_name) || (left.title ?? "").localeCompare(right.title ?? "");
+    });
 
-export function getJobByQuery(
-  db: Database.Database,
-  query: string,
-): JobRecord | undefined {
-  const exact = db
-    .prepare(
-      `SELECT jobs.*, job_sources.external_id, job_sources.url AS source_url
-       FROM jobs
-       JOIN job_sources ON job_sources.id = jobs.source_id
-       WHERE LOWER(company_name) = LOWER(?) OR LOWER(COALESCE(title, '')) = LOWER(?)
-       ORDER BY
-         CASE WHEN LOWER(COALESCE(title, '')) = LOWER(?) THEN 0 ELSE 1 END,
-         CASE WHEN role_source != 'company_fallback' THEN 0 ELSE 1 END ASC,
-         score DESC,
-         CASE WHEN title IS NULL THEN 1 ELSE 0 END ASC,
-         LENGTH(company_name || ' ' || COALESCE(title, '')) ASC
-       LIMIT 1`,
-    )
-    .get(query, query, query) as JobRecord | undefined;
-  if (exact) return exact;
-
-  const partial = db
-    .prepare(
-      `SELECT jobs.*, job_sources.external_id, job_sources.url AS source_url
-       FROM jobs
-       JOIN job_sources ON job_sources.id = jobs.source_id
-       WHERE LOWER(company_name) LIKE LOWER(?)
-          OR LOWER(COALESCE(title, '')) LIKE LOWER(?)
-          OR LOWER(company_name || ' ' || COALESCE(title, '')) LIKE LOWER(?)
-       ORDER BY
-         CASE WHEN LOWER(COALESCE(title, '')) = LOWER(?) THEN 0 ELSE 1 END,
-         CASE WHEN role_source != 'company_fallback' THEN 0 ELSE 1 END ASC,
-         score DESC,
-         CASE WHEN title IS NULL THEN 1 ELSE 0 END ASC,
-         LENGTH(company_name || ' ' || COALESCE(title, '')) ASC
-       LIMIT 1`,
-    )
-    .get(`%${query}%`, `%${query}%`, `%${query}%`, query) as JobRecord | undefined;
-  return partial;
-}
-
-export function getApplicationByJobId(
-  db: Database.Database,
-  jobId: number,
-): ApplicationRecord | undefined {
-  return db
-    .prepare(`SELECT * FROM applications WHERE job_id = ?`)
-    .get(jobId) as ApplicationRecord | undefined;
-}
-
-export function upsertDraft(
-  db: Database.Database,
-  input: DraftUpsertInput,
-): number {
-  const existing = db
-    .prepare(`SELECT id, application_id, gmail_draft_id FROM drafts WHERE job_id = ? AND variant = ?`)
-    .get(input.jobId, input.variant) as { id: number; application_id: number | null; gmail_draft_id: string | null } | undefined;
-
-  db.prepare(
-    `INSERT INTO drafts (job_id, application_id, variant, generated_content, edited_content, gmail_draft_id, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
-     ON CONFLICT(job_id, variant) DO UPDATE SET
-       application_id = COALESCE(excluded.application_id, drafts.application_id),
-       generated_content = excluded.generated_content,
-       edited_content = excluded.edited_content,
-       gmail_draft_id = COALESCE(excluded.gmail_draft_id, drafts.gmail_draft_id),
-       updated_at = datetime('now')`,
-  ).run(
-    input.jobId,
-    input.applicationId ?? null,
-    input.variant,
-    input.generatedContent,
-    input.editedContent ?? null,
-    input.gmailDraftId ?? null,
+  const rerankedJobs = await rerankItemsWithAnthropic(
+    sortedJobs,
+    mapJobToAnthropicCandidate,
+    { purpose: filters.todayOnly ? "apply" : "review", candidateLimit: Math.max(limit * 3, 30) },
   );
 
-  const row = db
-    .prepare(`SELECT id FROM drafts WHERE job_id = ? AND variant = ?`)
-    .get(input.jobId, input.variant) as { id: number };
+  return rerankedJobs.slice(0, limit);
+}
+
+export async function getJobByQuery(
+  db: DbClient,
+  query: string,
+): Promise<JobRecord | undefined> {
+  const jobs = await fetchJobsWithSource(db);
+  const normalized = query.toLowerCase();
+
+  const exact = jobs
+    .filter((job) => job.company_name.toLowerCase() === normalized || (job.title ?? "").toLowerCase() === normalized)
+    .sort((a, b) => {
+      const titleDiff = ((a.title ?? "").toLowerCase() === normalized ? 0 : 1) - ((b.title ?? "").toLowerCase() === normalized ? 0 : 1);
+      if (titleDiff !== 0) return titleDiff;
+      const fallbackDiff = (a.role_source === "company_fallback" ? 1 : 0) - (b.role_source === "company_fallback" ? 1 : 0);
+      if (fallbackDiff !== 0) return fallbackDiff;
+      if (b.score !== a.score) return b.score - a.score;
+      const titleNullDiff = (a.title == null ? 1 : 0) - (b.title == null ? 1 : 0);
+      if (titleNullDiff !== 0) return titleNullDiff;
+      return `${a.company_name} ${a.title ?? ""}`.length - `${b.company_name} ${b.title ?? ""}`.length;
+    })[0];
+  if (exact) return exact;
+
+  return jobs
+    .filter((job) => job.company_name.toLowerCase().includes(normalized) || (job.title ?? "").toLowerCase().includes(normalized) || `${job.company_name} ${job.title ?? ""}`.toLowerCase().includes(normalized))
+    .sort((a, b) => {
+      const exactTitleDiff = ((a.title ?? "").toLowerCase() === normalized ? 0 : 1) - ((b.title ?? "").toLowerCase() === normalized ? 0 : 1);
+      if (exactTitleDiff !== 0) return exactTitleDiff;
+      const fallbackDiff = (a.role_source === "company_fallback" ? 1 : 0) - (b.role_source === "company_fallback" ? 1 : 0);
+      if (fallbackDiff !== 0) return fallbackDiff;
+      if (b.score !== a.score) return b.score - a.score;
+      const titleNullDiff = (a.title == null ? 1 : 0) - (b.title == null ? 1 : 0);
+      if (titleNullDiff !== 0) return titleNullDiff;
+      return `${a.company_name} ${a.title ?? ""}`.length - `${b.company_name} ${b.title ?? ""}`.length;
+    })[0];
+}
+
+export async function getJobById(
+  db: DbClient,
+  jobId: number,
+): Promise<JobRecord | undefined> {
+  const jobs = await fetchJobsWithSource(db);
+  return jobs.find((job) => job.id === jobId);
+}
+
+export async function listBrowseJobs(
+  db: DbClient,
+  filters: BrowseFilters,
+): Promise<BrowseJobRecord[]> {
+  let jobs = await fetchJobsWithSource(db) as BrowseJobRecord[];
+
+  if (filters.query) {
+    const q = filters.query.toLowerCase();
+    jobs = jobs.filter((job) =>
+      job.company_name.toLowerCase().includes(q)
+      || (job.title ?? "").toLowerCase().includes(q)
+      || job.summary.toLowerCase().includes(q)
+      || job.tags_json.some((tag) => tag.toLowerCase().includes(q))
+      || job.industries_json.some((industry) => industry.toLowerCase().includes(q)),
+    );
+  }
+  if (filters.minScore != null) jobs = jobs.filter((job) => job.score >= filters.minScore!);
+  if (filters.status) jobs = jobs.filter((job) => job.status === filters.status);
+  if (filters.remoteOnly) jobs = jobs.filter((job) => job.remote_flag);
+  if (filters.source) jobs = jobs.filter((job) => job.provider === filters.source);
+  if (filters.prospectOnly) jobs = jobs.filter((job) => Boolean(job.score_breakdown_json.prospect_listed));
+  if (filters.realRolesOnly) jobs = jobs.filter((job) => job.role_source !== "company_fallback");
+  if (filters.postedWithinDays != null) {
+    const cutoff = Date.now() - filters.postedWithinDays * 24 * 60 * 60 * 1000;
+    jobs = jobs.filter((job) => job.posted_at != null && new Date(job.posted_at).getTime() >= cutoff);
+  }
+  if (filters.trackedWithinDays != null) {
+    const cutoff = Date.now() - filters.trackedWithinDays * 24 * 60 * 60 * 1000;
+    jobs = jobs.filter((job) => new Date(job.created_at).getTime() >= cutoff);
+  }
+
+  const limit = filters.limit ?? 50;
+  const sortedJobs = jobs
+    .sort((a, b) => {
+      if (filters.sort === "posted") {
+        const aMissing = a.posted_at == null ? 1 : 0;
+        const bMissing = b.posted_at == null ? 1 : 0;
+        if (aMissing !== bMissing) return aMissing - bMissing;
+        const postedDiff = new Date(b.posted_at ?? 0).getTime() - new Date(a.posted_at ?? 0).getTime();
+        if (postedDiff !== 0) return postedDiff;
+      } else if (filters.sort === "tracked") {
+        const trackedDiff = new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+        if (trackedDiff !== 0) return trackedDiff;
+      } else if (filters.sort === "company") {
+        const companyDiff = a.company_name.localeCompare(b.company_name);
+        if (companyDiff !== 0) return companyDiff;
+      } else {
+        const fallbackDiff = (a.role_source === "company_fallback" ? 1 : 0) - (b.role_source === "company_fallback" ? 1 : 0);
+        if (fallbackDiff !== 0) return fallbackDiff;
+      }
+
+      const aRank = a.score - titleRankingPenalty(a.title);
+      const bRank = b.score - titleRankingPenalty(b.title);
+      if (bRank !== aRank) return bRank - aRank;
+      if (b.score !== a.score) return b.score - a.score;
+      const titleNullDiff = (a.title == null ? 1 : 0) - (b.title == null ? 1 : 0);
+      if (titleNullDiff !== 0) return titleNullDiff;
+      return a.company_name.localeCompare(b.company_name) || (a.title ?? "").localeCompare(b.title ?? "");
+    });
+
+  if (filters.sort !== "score") {
+    return sortedJobs.slice(0, limit);
+  }
+
+  const rerankedJobs = await rerankItemsWithAnthropic(
+    sortedJobs,
+    mapJobToAnthropicCandidate,
+    { purpose: "browse", candidateLimit: Math.max(limit * 3, 40) },
+  );
+
+  return rerankedJobs.slice(0, limit);
+}
+
+export async function getApplicationByJobId(
+  db: DbClient,
+  jobId: number,
+): Promise<ApplicationRecord | undefined> {
+  const { data, error } = await db.from("applications").select("*").eq("job_id", jobId).maybeSingle();
+  if (error) throw new Error(`get application by job: ${error.message}`);
+  return data ? normalizeApplicationRow(data as Record<string, any>) : undefined;
+}
+
+export async function upsertDraft(
+  db: DbClient,
+  input: DraftUpsertInput,
+): Promise<number> {
+  const { data: existingData, error: existingError } = await db
+    .from("drafts")
+    .select("id, application_id, gmail_draft_id")
+    .eq("job_id", input.jobId)
+    .eq("variant", input.variant)
+    .maybeSingle();
+  if (existingError) throw new Error(`get existing draft: ${existingError.message}`);
+
+  const { data, error } = await db
+    .from("drafts")
+    .upsert({
+      job_id: input.jobId,
+      application_id: input.applicationId ?? existingData?.application_id ?? null,
+      variant: input.variant,
+      generated_content: input.generatedContent,
+      edited_content: input.editedContent ?? null,
+      gmail_draft_id: input.gmailDraftId ?? existingData?.gmail_draft_id ?? null,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "job_id,variant" })
+    .select("id")
+    .single();
+  const draftId = assertNoError(error, "upsert draft", data).id;
 
   if (input.applicationId != null) {
-    createApplicationEvent(
+    await createApplicationEvent(
       db,
       input.applicationId,
-      existing ? "draft_updated" : "draft_saved",
+      existingData ? "draft_updated" : "draft_saved",
       null,
       null,
       undefined,
-      { draftId: row.id, variant: input.variant, gmailDraftId: input.gmailDraftId ?? existing?.gmail_draft_id ?? null },
+      { draftId, variant: input.variant, gmailDraftId: input.gmailDraftId ?? existingData?.gmail_draft_id ?? null },
     );
   }
 
-  return row.id;
+  return draftId;
 }
 
-export function listDrafts(
-  db: Database.Database,
+export async function listDrafts(
+  db: DbClient,
   query?: string,
-): DraftRecord[] {
-  const where = query
-    ? `WHERE jobs.company_name LIKE ? OR COALESCE(jobs.title, '') LIKE ? OR drafts.variant LIKE ?`
-    : "";
-  const params = query ? [`%${query}%`, `%${query}%`, `%${query}%`] : [];
-  return db
-    .prepare(
-      `SELECT drafts.*, jobs.company_name, jobs.title, applications.status AS application_status
-       FROM drafts
-       JOIN jobs ON jobs.id = drafts.job_id
-       LEFT JOIN applications ON applications.id = drafts.application_id
-       ${where}
-       ORDER BY drafts.updated_at DESC, drafts.id DESC`,
-    )
-    .all(...params) as DraftRecord[];
+): Promise<DraftRecord[]> {
+  const { data, error } = await db
+    .from("drafts")
+    .select("*, jobs!inner(company_name, title), applications(status)")
+    .order("updated_at", { ascending: false })
+    .order("id", { ascending: false });
+  const rows = (assertNoError(error, "list drafts", data) as DbRow[]).map((row: DbRow) => normalizeDraftRow(row));
+  if (!query) return rows;
+  const q = query.toLowerCase();
+  return rows.filter((draft: DraftRecord) =>
+    draft.company_name.toLowerCase().includes(q)
+    || (draft.title ?? "").toLowerCase().includes(q)
+    || draft.variant.toLowerCase().includes(q),
+  );
 }
 
-export function getDraftById(
-  db: Database.Database,
+export async function getDraftById(
+  db: DbClient,
   draftId: number,
-): DraftRecord | undefined {
-  return db
-    .prepare(
-      `SELECT drafts.*, jobs.company_name, jobs.title, applications.status AS application_status
-       FROM drafts
-       JOIN jobs ON jobs.id = drafts.job_id
-       LEFT JOIN applications ON applications.id = drafts.application_id
-       WHERE drafts.id = ?`,
-    )
-    .get(draftId) as DraftRecord | undefined;
+): Promise<DraftRecord | undefined> {
+  const { data, error } = await db
+    .from("drafts")
+    .select("*, jobs!inner(company_name, title), applications(status)")
+    .eq("id", draftId)
+    .maybeSingle();
+  if (error) throw new Error(`get draft by id: ${error.message}`);
+  return data ? normalizeDraftRow(data as Record<string, any>) : undefined;
 }
 
-export function listAutoDraftJobs(
-  db: Database.Database,
+export async function getLatestDraftByJobId(
+  db: DbClient,
+  jobId: number,
+): Promise<DraftRecord | undefined> {
+  const { data, error } = await db
+    .from("drafts")
+    .select("*, jobs!inner(company_name, title), applications(status)")
+    .eq("job_id", jobId)
+    .order("updated_at", { ascending: false })
+    .order("id", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw new Error(`get latest draft by job id: ${error.message}`);
+  return data ? normalizeDraftRow(data as Record<string, any>) : undefined;
+}
+
+export async function listAutoDraftJobs(
+  db: DbClient,
   minScore: number,
-): JobRecord[] {
-  return db
-    .prepare(
-      `SELECT jobs.*, job_sources.external_id, job_sources.url AS source_url
-       FROM jobs
-       JOIN job_sources ON job_sources.id = jobs.source_id
-       LEFT JOIN drafts ON drafts.job_id = jobs.id
-       WHERE jobs.score >= ?
-         AND jobs.status = 'new'
-         AND drafts.id IS NULL
-       ORDER BY
-         CASE WHEN jobs.role_source != 'company_fallback' THEN 0 ELSE 1 END ASC,
-         jobs.score DESC,
-         jobs.company_name ASC,
-         jobs.title ASC`,
-    )
-    .all(minScore) as JobRecord[];
-}
-
-function parseStringArray(raw: string): string[] {
-  return JSON.parse(raw) as string[];
-}
-
-function parseScoreBreakdown(raw: string): NextActionRecord["scoreBreakdown"] {
-  return JSON.parse(raw) as NextActionRecord["scoreBreakdown"];
+): Promise<JobRecord[]> {
+  const jobs = await fetchJobsWithSource(db);
+  const { data: draftsData, error: draftsError } = await db.from("drafts").select("job_id");
+  if (draftsError) throw new Error(`list auto-draft jobs: ${draftsError.message}`);
+  const draftedJobIds = new Set(((draftsData ?? []) as DbRow[]).map((row: DbRow) => Number(row.job_id)));
+  return jobs
+    .filter((job) => job.score >= minScore)
+    .filter((job) => job.status === "new")
+    .filter((job) => !draftedJobIds.has(job.id))
+    .sort((a, b) => {
+      const fallbackDiff = (a.role_source === "company_fallback" ? 1 : 0) - (b.role_source === "company_fallback" ? 1 : 0);
+      if (fallbackDiff !== 0) return fallbackDiff;
+      return b.score - a.score || a.company_name.localeCompare(b.company_name) || (a.title ?? "").localeCompare(b.title ?? "");
+    });
 }
 
 function scoreAction(
@@ -432,25 +846,16 @@ function scoreAction(
     if (dueInDays <= 3) return score + 50;
     return score + 35;
   }
-
   if (type === "send_draft") {
     return score + 45;
   }
-
   return score + 20;
 }
 
-function buildReason(job: JobRecord, extraReason?: string): string {
-  const bullets = parseStringArray(job.explanation_bullets_json);
-  return extraReason ?? bullets[0] ?? `${job.score} score with solid fit signals`;
-}
-
 function buildWhyMatch(job: JobRecord): string[] {
-  const bullets = parseStringArray(job.explanation_bullets_json).filter(Boolean);
-  if (bullets.length > 0) {
-    return bullets.slice(0, 2);
-  }
-  return [`${job.score} score from the current fit model`];
+  return job.explanation_bullets_json.filter(Boolean).slice(0, 2).length > 0
+    ? job.explanation_bullets_json.filter(Boolean).slice(0, 2)
+    : [`${job.score} score from the current fit model`];
 }
 
 function hasMinimumApplyFit(breakdown: NextActionRecord["scoreBreakdown"]): boolean {
@@ -458,78 +863,52 @@ function hasMinimumApplyFit(breakdown: NextActionRecord["scoreBreakdown"]): bool
   const stackFitOk = breakdown.stackFit >= TODAY_RANKING.applyMinStackFit;
   const combinedFitOk =
     (breakdown.roleFit + breakdown.stackFit) >= TODAY_RANKING.applyMinCombinedFit;
-
   return roleFitOk && stackFitOk && combinedFitOk;
 }
 
 function hasStrongTechnicalFit(breakdown: NextActionRecord["scoreBreakdown"]): boolean {
-  return (
-    breakdown.roleFit >= TODAY_RANKING.strongRoleFit
-    || breakdown.stackFit >= TODAY_RANKING.strongStackFit
-  );
+  return breakdown.roleFit >= TODAY_RANKING.strongRoleFit || breakdown.stackFit >= TODAY_RANKING.strongStackFit;
 }
 
 function isTechnicalBullet(bullet: string): boolean {
   const normalized = bullet.toLowerCase();
-  return (
-    normalized.includes("role fit")
+  return normalized.includes("role fit")
     || normalized.includes("stack aligns")
     || normalized.includes("target role")
-    || normalized.includes("target role families")
-  );
+    || normalized.includes("target role families");
 }
 
 function isSoftSignalBullet(bullet: string): boolean {
   const normalized = bullet.toLowerCase();
-  return (
-    normalized.includes("remote")
+  return normalized.includes("remote")
     || normalized.includes("fresh enough")
     || normalized.includes("prospect-curated")
     || normalized.includes("company signal")
-    || normalized.includes("hiring posture")
-  );
+    || normalized.includes("hiring posture");
 }
 
 function isSoftSignalDriven(job: JobRecord, breakdown: NextActionRecord["scoreBreakdown"]): boolean {
-  if (hasStrongTechnicalFit(breakdown)) {
-    return false;
-  }
-
-  const bullets = parseStringArray(job.explanation_bullets_json).filter(Boolean);
-  if (bullets.length === 0) {
-    return false;
-  }
-
+  if (hasStrongTechnicalFit(breakdown)) return false;
+  const bullets = job.explanation_bullets_json.filter(Boolean);
+  if (bullets.length === 0) return false;
   return bullets.every((bullet) => isSoftSignalBullet(bullet) && !isTechnicalBullet(bullet));
 }
 
 function buildRisk(job: JobRecord): string | null {
-  return parseStringArray(job.risk_bullets_json)[0] ?? null;
+  return job.risk_bullets_json[0] ?? null;
 }
 
 function buildNextStep(type: "followup" | "send_draft" | "apply", risk: string | null): string {
-  if (type === "followup") {
-    return "send the follow-up now";
-  }
-  if (type === "send_draft") {
-    return "polish the saved draft and send the application";
-  }
-  if (risk?.toLowerCase().includes("compensation")) {
-    return "do a quick final check, then apply today";
-  }
+  if (type === "followup") return "send the follow-up now";
+  if (type === "send_draft") return "polish the saved draft and send the application";
+  if (risk?.toLowerCase().includes("compensation")) return "do a quick final check, then apply today";
   return "apply today while the fit is fresh";
 }
 
 function buildApplyReason(status: JobStatus, breakdown: NextActionRecord["scoreBreakdown"]): string {
-  if (status === "shortlisted") {
-    return "Already shortlisted and ready for a decision today";
-  }
-  if (status === "saved") {
-    return "Already saved; worth pushing to a real apply decision";
-  }
-  if (breakdown.freshness >= 7) {
-    return "Fresh enough to prioritize from recent hiring activity";
-  }
+  if (status === "shortlisted") return "Already shortlisted and ready for a decision today";
+  if (status === "saved") return "Already saved; worth pushing to a real apply decision";
+  if (breakdown.freshness >= 7) return "Fresh enough to prioritize from recent hiring activity";
   return "Strong unapplied match in your queue";
 }
 
@@ -542,354 +921,219 @@ function scoreApplyAction(job: JobRecord, breakdown: NextActionRecord["scoreBrea
     + (breakdown.companySignal * TODAY_RANKING.companySignalWeight)
     + TODAY_RANKING.applyBaseScore;
 
-  if (isSoftSignalDriven(job, breakdown)) {
-    rank -= TODAY_RANKING.softSignalPenalty;
-  }
-
+  rank -= titleRankingPenalty(job.title);
+  if (isSoftSignalDriven(job, breakdown)) rank -= TODAY_RANKING.softSignalPenalty;
   return rank;
 }
 
-export function listNextActions(
-  db: Database.Database,
+export async function listNextActions(
+  db: DbClient,
   limit = 10,
   opts: { includeFallback?: boolean } = {},
-): NextActionRecord[] {
-  const fallbackClause = opts.includeFallback ? "" : `AND jobs.role_source != 'company_fallback'`;
-  const dueFollowups = db
-    .prepare(
-      `SELECT
-         followups.id AS followup_id,
-         followups.application_id,
-         followups.due_at,
-         jobs.id AS job_id,
-         jobs.company_name,
-         jobs.title,
-         jobs.summary,
-         jobs.locations,
-         jobs.remote_flag,
-         jobs.stage,
-         jobs.batch,
-         jobs.extracted_skills_json,
-         jobs.tags_json,
-         jobs.industries_json,
-         jobs.score,
-         jobs.score_breakdown_json,
-         jobs.status,
-         jobs.explanation_bullets_json,
-         jobs.risk_bullets_json
-       FROM followups
-       JOIN jobs ON jobs.id = followups.job_id
-       WHERE followups.status = 'pending'
-         ${fallbackClause}
-       ORDER BY followups.due_at ASC, jobs.score DESC`,
-    )
-    .all() as Array<{
-      followup_id: number;
-      application_id: number | null;
-      due_at: string;
-      job_id: number;
-      company_name: string;
-      title: string | null;
-      summary: string;
-      locations: string;
-      remote_flag: number;
-      stage: string;
-      batch: string;
-      extracted_skills_json: string;
-      tags_json: string;
-      industries_json: string;
-      score: number;
-      score_breakdown_json: string;
-      status: JobStatus;
-      explanation_bullets_json: string;
-      risk_bullets_json: string;
-    }>;
+): Promise<NextActionRecord[]> {
+  const includeFallback = opts.includeFallback ?? false;
+  const jobs = await fetchJobsWithSource(db);
+  const filteredJobs = includeFallback ? jobs : jobs.filter((job) => job.role_source !== "company_fallback");
 
-  const draftedApplications = db
-    .prepare(
-      `SELECT
-         applications.id AS application_id,
-         jobs.id AS job_id,
-         jobs.company_name,
-         jobs.title,
-         jobs.summary,
-         jobs.locations,
-         jobs.remote_flag,
-         jobs.stage,
-         jobs.batch,
-         jobs.extracted_skills_json,
-         jobs.tags_json,
-         jobs.industries_json,
-         jobs.score,
-         jobs.score_breakdown_json,
-         jobs.status,
-         jobs.explanation_bullets_json,
-         jobs.risk_bullets_json,
-         MAX(drafts.updated_at) AS draft_updated_at
-       FROM applications
-       JOIN jobs ON jobs.id = applications.job_id
-       LEFT JOIN drafts ON drafts.application_id = applications.id OR drafts.job_id = jobs.id
-       WHERE applications.status = 'drafted'
-         ${fallbackClause}
-       GROUP BY applications.id
-       ORDER BY draft_updated_at DESC, jobs.score DESC`,
-    )
-    .all() as Array<{
-      application_id: number;
-      job_id: number;
-      company_name: string;
-      title: string | null;
-      summary: string;
-      locations: string;
-      remote_flag: number;
-      stage: string;
-      batch: string;
-      extracted_skills_json: string;
-      tags_json: string;
-      industries_json: string;
-      score: number;
-      score_breakdown_json: string;
-      status: JobStatus;
-      explanation_bullets_json: string;
-      risk_bullets_json: string;
-      draft_updated_at: string | null;
-    }>;
+  const { data: followupsData, error: followupsError } = await db
+    .from("followups")
+    .select("*, jobs!inner(company_name, title, website)")
+    .eq("status", "pending");
+  if (followupsError) throw new Error(`list next actions followups: ${followupsError.message}`);
 
-  const unappliedJobs = db
-    .prepare(
-      `SELECT
-         jobs.id AS job_id,
-         jobs.company_name,
-         jobs.title,
-         jobs.summary,
-         jobs.locations,
-         jobs.remote_flag,
-         jobs.stage,
-         jobs.batch,
-         jobs.extracted_skills_json,
-         jobs.tags_json,
-         jobs.industries_json,
-         jobs.score,
-         jobs.score_breakdown_json,
-         jobs.status,
-         jobs.explanation_bullets_json,
-         jobs.risk_bullets_json
-       FROM jobs
-       LEFT JOIN applications ON applications.job_id = jobs.id
-       WHERE jobs.status IN ('new', 'reviewed', 'saved', 'shortlisted')
-         ${fallbackClause}
-         AND (applications.id IS NULL OR applications.status IN ('saved', 'shortlisted'))
-         AND NOT EXISTS (
-           SELECT 1
-           FROM followups
-           WHERE followups.job_id = jobs.id AND followups.status = 'pending'
-         )
-       ORDER BY
-         CASE WHEN jobs.role_source != 'company_fallback' THEN 0 ELSE 1 END ASC,
-         jobs.score DESC,
-         jobs.company_name ASC`,
-    )
-    .all() as Array<{
-      job_id: number;
-      company_name: string;
-      title: string | null;
-      summary: string;
-      locations: string;
-      remote_flag: number;
-      stage: string;
-      batch: string;
-      extracted_skills_json: string;
-      tags_json: string;
-      industries_json: string;
-      score: number;
-      score_breakdown_json: string;
-      status: JobStatus;
-      explanation_bullets_json: string;
-      risk_bullets_json: string;
-    }>;
+  const { data: applicationsData, error: applicationsError } = await db.from("applications").select("*");
+  if (applicationsError) throw new Error(`list next actions applications: ${applicationsError.message}`);
+  const applications = ((applicationsData ?? []) as DbRow[]).map((row: DbRow) => normalizeApplicationRow(row));
+  const applicationsByJobId = new Map(applications.map((application: ApplicationRecord) => [application.job_id, application]));
 
-  const actions: NextActionRecord[] = [
-    ...dueFollowups.map((row) => {
-      const job = row as unknown as JobRecord;
-      const risk = buildRisk(job);
-      const breakdown = parseScoreBreakdown(row.score_breakdown_json);
-      return {
-        actionType: "followup" as const,
-        rankScore: scoreAction("followup", row.score, row.due_at),
-        companyName: row.company_name,
-        title: row.title,
-        summary: row.summary,
-        locations: row.locations,
-        remoteFlag: row.remote_flag === 1,
-        stage: row.stage,
-        batch: row.batch,
-        extractedSkills: parseStringArray(row.extracted_skills_json),
-        tags: parseStringArray(row.tags_json),
-        industries: parseStringArray(row.industries_json),
-        score: row.score,
-        scoreBreakdown: breakdown,
-        status: row.status,
-        reason: row.due_at <= new Date().toISOString()
-          ? `Follow-up overdue since ${row.due_at}`
-          : `Follow-up due ${row.due_at}`,
-        whyMatch: buildWhyMatch(job),
-        risk,
-        nextStep: buildNextStep("followup", risk),
-        dueAt: row.due_at,
-        jobId: row.job_id,
-        applicationId: row.application_id,
-        followupId: row.followup_id,
-      };
-    }),
-    ...draftedApplications.map((row) => {
-      const job = row as unknown as JobRecord;
-      const risk = buildRisk(job);
-      const breakdown = parseScoreBreakdown(row.score_breakdown_json);
-      return {
-        actionType: "send_draft" as const,
-        rankScore: scoreAction("send_draft", row.score),
-        companyName: row.company_name,
-        title: row.title,
-        summary: row.summary,
-        locations: row.locations,
-        remoteFlag: row.remote_flag === 1,
-        stage: row.stage,
-        batch: row.batch,
-        extractedSkills: parseStringArray(row.extracted_skills_json),
-        tags: parseStringArray(row.tags_json),
-        industries: parseStringArray(row.industries_json),
-        score: row.score,
-        scoreBreakdown: breakdown,
-        status: row.status,
-        reason: "Draft is ready; this is close to submission",
-        whyMatch: buildWhyMatch(job),
-        risk,
-        nextStep: buildNextStep("send_draft", risk),
-        dueAt: null,
-        jobId: row.job_id,
-        applicationId: row.application_id,
-      };
-    }),
-    ...unappliedJobs.flatMap((row) => {
-      const job = row as unknown as JobRecord;
-      const risk = buildRisk(job);
-      const breakdown = parseScoreBreakdown(row.score_breakdown_json);
-      if (!hasMinimumApplyFit(breakdown)) {
-        return [];
-      }
-      return {
-        actionType: "apply" as const,
-        rankScore: scoreApplyAction(job, breakdown),
-        companyName: row.company_name,
-        title: row.title,
-        summary: row.summary,
-        locations: row.locations,
-        remoteFlag: row.remote_flag === 1,
-        stage: row.stage,
-        batch: row.batch,
-        extractedSkills: parseStringArray(row.extracted_skills_json),
-        tags: parseStringArray(row.tags_json),
-        industries: parseStringArray(row.industries_json),
-        score: row.score,
-        scoreBreakdown: breakdown,
-        status: row.status,
-        reason: buildApplyReason(row.status, breakdown),
-        whyMatch: buildWhyMatch(job),
-        risk,
-        nextStep: buildNextStep("apply", risk),
-        dueAt: null,
-        jobId: row.job_id,
-      };
-    }),
-  ];
+  const { data: draftsData, error: draftsError } = await db.from("drafts").select("*");
+  if (draftsError) throw new Error(`list next actions drafts: ${draftsError.message}`);
+  const drafts = (draftsData ?? []) as Array<Record<string, any>>;
 
-  return actions
+  const actions: NextActionRecord[] = [];
+
+  for (const row of (followupsData ?? []) as Array<Record<string, any>>) {
+    const followup = normalizeFollowupRow(row);
+    const job = filteredJobs.find((candidate) => candidate.id === followup.job_id);
+    if (!job) continue;
+    const risk = buildRisk(job);
+    actions.push({
+      actionType: "followup",
+      rankScore: scoreAction("followup", job.score, followup.due_at),
+      companyName: job.company_name,
+      title: job.title,
+      summary: job.summary,
+      locations: job.locations,
+      remoteFlag: job.remote_flag,
+      stage: job.stage,
+      batch: job.batch,
+      extractedSkills: job.extracted_skills_json,
+      tags: job.tags_json,
+      industries: job.industries_json,
+      score: job.score,
+      scoreBreakdown: job.score_breakdown_json,
+      status: job.status,
+      reason: followup.due_at <= new Date().toISOString() ? `Follow-up overdue since ${followup.due_at}` : `Follow-up due ${followup.due_at}`,
+      whyMatch: buildWhyMatch(job),
+      risk,
+      nextStep: buildNextStep("followup", risk),
+      dueAt: followup.due_at,
+      jobId: job.id,
+      applicationId: followup.application_id,
+      followupId: followup.id,
+    });
+  }
+
+  for (const application of applications.filter((item: ApplicationRecord) => item.status === "drafted")) {
+    const job = filteredJobs.find((candidate) => candidate.id === application.job_id);
+    if (!job) continue;
+    const risk = buildRisk(job);
+    const relatedDrafts = drafts.filter((draft) => draft.application_id === application.id || draft.job_id === job.id);
+    const latestDraft = relatedDrafts.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())[0];
+    actions.push({
+      actionType: "send_draft",
+      rankScore: scoreAction("send_draft", job.score),
+      companyName: job.company_name,
+      title: job.title,
+      summary: job.summary,
+      locations: job.locations,
+      remoteFlag: job.remote_flag,
+      stage: job.stage,
+      batch: job.batch,
+      extractedSkills: job.extracted_skills_json,
+      tags: job.tags_json,
+      industries: job.industries_json,
+      score: job.score,
+      scoreBreakdown: job.score_breakdown_json,
+      status: job.status,
+      reason: latestDraft ? "Draft is ready; this is close to submission" : "Application is drafted",
+      whyMatch: buildWhyMatch(job),
+      risk,
+      nextStep: buildNextStep("send_draft", risk),
+      dueAt: null,
+      jobId: job.id,
+      applicationId: application.id,
+    });
+  }
+
+  for (const job of filteredJobs) {
+    const application = applicationsByJobId.get(job.id);
+    if (!["new", "reviewed", "saved", "shortlisted"].includes(job.status)) continue;
+    if (application && !["saved", "shortlisted"].includes(application.status as ApplicationStatus)) continue;
+    if (actions.some((action) => action.jobId === job.id && action.actionType === "followup")) continue;
+    if (isStrongTitleMismatch(job.title)) continue;
+    const breakdown = job.score_breakdown_json;
+    if (!hasMinimumApplyFit(breakdown)) continue;
+    const risk = buildRisk(job);
+    actions.push({
+      actionType: "apply",
+      rankScore: scoreApplyAction(job, breakdown),
+      companyName: job.company_name,
+      title: job.title,
+      summary: job.summary,
+      locations: job.locations,
+      remoteFlag: job.remote_flag,
+      stage: job.stage,
+      batch: job.batch,
+      extractedSkills: job.extracted_skills_json,
+      tags: job.tags_json,
+      industries: job.industries_json,
+      score: job.score,
+      scoreBreakdown: breakdown,
+      status: job.status,
+      reason: buildApplyReason(job.status, breakdown),
+      whyMatch: buildWhyMatch(job),
+      risk,
+      nextStep: buildNextStep("apply", risk),
+      dueAt: null,
+      jobId: job.id,
+    });
+  }
+
+  const sortedActions = actions
     .sort((left, right) => right.rankScore - left.rankScore || right.score - left.score || left.companyName.localeCompare(right.companyName))
-    .slice(0, limit);
+  ;
+
+  const nonApplyActions = sortedActions.filter((action) => action.actionType !== "apply");
+  const applyActions = sortedActions.filter((action) => action.actionType === "apply");
+  const rerankedApplyActions = await rerankItemsWithAnthropic(
+    applyActions,
+    mapActionToAnthropicCandidate,
+    { purpose: "apply", candidateLimit: Math.max(limit * 3, 25) },
+  );
+
+  return [...nonApplyActions, ...rerankedApplyActions].slice(0, limit);
 }
 
-export function createApplicationEvent(
-  db: Database.Database,
+export async function createApplicationEvent(
+  db: DbClient,
   applicationId: number,
   eventType: string,
   previousStatus: ApplicationStatus | null,
   nextStatus: ApplicationStatus | null,
   note?: string,
   metadata?: Record<string, unknown>,
-): number {
-  const result = db
-    .prepare(
-      `INSERT INTO application_events (
-        application_id, event_type, previous_status, next_status, note, metadata_json
-      ) VALUES (?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
-      applicationId,
-      eventType,
-      previousStatus ?? null,
-      nextStatus ?? null,
-      note ?? null,
-      JSON.stringify(metadata ?? {}),
-    );
-  return Number(result.lastInsertRowid);
+): Promise<number> {
+  const { data, error } = await db
+    .from("application_events")
+    .insert({
+      application_id: applicationId,
+      event_type: eventType,
+      previous_status: previousStatus,
+      next_status: nextStatus,
+      note: note ?? null,
+      metadata_json: metadata ?? {},
+    })
+    .select("id")
+    .single();
+  return assertNoError(error, "create application event", data).id;
 }
 
-export function getApplicationEvents(
-  db: Database.Database,
+export async function getApplicationEvents(
+  db: DbClient,
   applicationId: number,
-): ApplicationEventRecord[] {
-  return db
-    .prepare(`SELECT * FROM application_events WHERE application_id = ? ORDER BY id ASC`)
-    .all(applicationId) as ApplicationEventRecord[];
+): Promise<ApplicationEventRecord[]> {
+  const { data, error } = await db
+    .from("application_events")
+    .select("*")
+    .eq("application_id", applicationId)
+    .order("id", { ascending: true });
+  const rows = assertNoError(error, "get application events", data) as DbRow[];
+  return rows.map((row: DbRow) => normalizeEventRow(row));
 }
 
-export function upsertApplication(
-  db: Database.Database,
+export async function upsertApplication(
+  db: DbClient,
   jobId: number,
   input: ApplicationUpdateInput,
-): number {
-  const existing = getApplicationByJobId(db, jobId);
-  db.prepare(
-    `INSERT INTO applications (
-       job_id, applied_at, status, notes, applied_url, resume_version, outreach_draft_version,
-       response_received, response_type, interview_stage, rejection_reason, last_contacted_at, updated_at
-     )
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-     ON CONFLICT(job_id) DO UPDATE SET
-       applied_at = COALESCE(excluded.applied_at, applications.applied_at),
-       status = excluded.status,
-       notes = COALESCE(excluded.notes, applications.notes),
-       applied_url = COALESCE(excluded.applied_url, applications.applied_url),
-       resume_version = COALESCE(excluded.resume_version, applications.resume_version),
-       outreach_draft_version = COALESCE(excluded.outreach_draft_version, applications.outreach_draft_version),
-       response_received = COALESCE(excluded.response_received, applications.response_received),
-       response_type = COALESCE(excluded.response_type, applications.response_type),
-       interview_stage = COALESCE(excluded.interview_stage, applications.interview_stage),
-       rejection_reason = COALESCE(excluded.rejection_reason, applications.rejection_reason),
-       last_contacted_at = COALESCE(excluded.last_contacted_at, applications.last_contacted_at),
-       updated_at = datetime('now')`,
-  ).run(
-    jobId,
-    input.appliedAt ?? null,
-    input.status,
-    input.note ?? null,
-    input.appliedUrl ?? null,
-    input.resumeVersion ?? null,
-    input.outreachDraftVersion ?? null,
-    input.responseReceived ? 1 : 0,
-    input.responseType ?? null,
-    input.interviewStage ?? null,
-    input.rejectionReason ?? null,
-    input.lastContactedAt ?? null,
-  );
+): Promise<number> {
+  const existing = await getApplicationByJobId(db, jobId);
+  const payload = {
+    job_id: jobId,
+    applied_at: input.appliedAt ?? existing?.applied_at ?? null,
+    status: input.status,
+    notes: input.note ?? existing?.notes ?? null,
+    applied_url: input.appliedUrl ?? existing?.applied_url ?? null,
+    resume_version: input.resumeVersion ?? existing?.resume_version ?? null,
+    outreach_draft_version: input.outreachDraftVersion ?? existing?.outreach_draft_version ?? null,
+    response_received: input.responseReceived ?? existing?.response_received ?? false,
+    response_type: input.responseType ?? existing?.response_type ?? null,
+    interview_stage: input.interviewStage ?? existing?.interview_stage ?? null,
+    rejection_reason: input.rejectionReason ?? existing?.rejection_reason ?? null,
+    last_contacted_at: input.lastContactedAt ?? existing?.last_contacted_at ?? null,
+    updated_at: new Date().toISOString(),
+  };
 
-  const row = db
-    .prepare(`SELECT id FROM applications WHERE job_id = ?`)
-    .get(jobId) as { id: number };
+  const { data, error } = await db
+    .from("applications")
+    .upsert(payload, { onConflict: "job_id" })
+    .select("id")
+    .single();
+  const applicationId = assertNoError(error, "upsert application", data).id;
 
-  createApplicationEvent(
+  await createApplicationEvent(
     db,
-    row.id,
+    applicationId,
     "status_changed",
     existing?.status ?? null,
     input.status,
@@ -907,76 +1151,103 @@ export function upsertApplication(
     },
   );
 
-  db.prepare(`UPDATE jobs SET status = ?, updated_at = datetime('now') WHERE id = ?`)
-    .run(maybeJobStatus(input.status), jobId);
+  const { error: jobError } = await db
+    .from("jobs")
+    .update({ status: maybeJobStatus(input.status), updated_at: new Date().toISOString() })
+    .eq("id", jobId);
+  assertNoError(jobError, "update job status from application", {});
 
-  return row.id;
+  return applicationId;
 }
 
-export function createFollowup(
-  db: Database.Database,
+export async function createFollowup(
+  db: DbClient,
   jobId: number,
   applicationId: number | null,
   dueAt: string,
   note?: string,
   status: FollowupStatus = "pending",
-): number {
-  const result = db
-    .prepare(
-      `INSERT INTO followups (job_id, application_id, due_at, status, note, updated_at)
-       VALUES (?, ?, ?, ?, ?, datetime('now'))`,
-    )
-    .run(jobId, applicationId, dueAt, status, note ?? null);
+): Promise<number> {
+  const { data, error } = await db
+    .from("followups")
+    .insert({
+      job_id: jobId,
+      application_id: applicationId,
+      due_at: dueAt,
+      status,
+      note: note ?? null,
+      updated_at: new Date().toISOString(),
+    })
+    .select("id")
+    .single();
+  const followupId = assertNoError(error, "create followup", data).id;
   if (applicationId != null) {
-    createApplicationEvent(db, applicationId, "followup_created", null, null, note, { dueAt, status });
+    await createApplicationEvent(db, applicationId, "followup_created", null, null, note, { dueAt, status });
   }
-  return Number(result.lastInsertRowid);
+  return followupId;
 }
 
-export function listPendingFollowups(db: Database.Database): FollowupRecord[] {
-  return db
-    .prepare(
-      `SELECT followups.*, jobs.company_name, jobs.website, jobs.title
-       FROM followups
-       JOIN jobs ON jobs.id = followups.job_id
-       WHERE followups.status = 'pending'
-       ORDER BY due_at ASC, followups.id ASC`,
-    )
-    .all() as FollowupRecord[];
+export async function listPendingFollowups(db: DbClient): Promise<FollowupRecord[]> {
+  const { data, error } = await db
+    .from("followups")
+    .select("*, jobs!inner(company_name, website, title)")
+    .eq("status", "pending")
+    .order("due_at", { ascending: true })
+    .order("id", { ascending: true });
+  const rows = assertNoError(error, "list pending followups", data) as DbRow[];
+  return rows.map((row: DbRow) => normalizeFollowupRow(row));
 }
 
-export function getFollowupById(
-  db: Database.Database,
+export async function getFollowupById(
+  db: DbClient,
   followupId: number,
-): FollowupRecord | undefined {
-  return db
-    .prepare(
-      `SELECT followups.*, jobs.company_name, jobs.website, jobs.title
-       FROM followups
-       JOIN jobs ON jobs.id = followups.job_id
-       WHERE followups.id = ?`,
-    )
-    .get(followupId) as FollowupRecord | undefined;
+): Promise<FollowupRecord | undefined> {
+  const { data, error } = await db
+    .from("followups")
+    .select("*, jobs!inner(company_name, website, title)")
+    .eq("id", followupId)
+    .maybeSingle();
+  if (error) throw new Error(`get followup by id: ${error.message}`);
+  return data ? normalizeFollowupRow(data as Record<string, any>) : undefined;
 }
 
-export function updateFollowup(
-  db: Database.Database,
+export async function getPendingFollowupByJobId(
+  db: DbClient,
+  jobId: number,
+): Promise<FollowupRecord | undefined> {
+  const { data, error } = await db
+    .from("followups")
+    .select("*, jobs(company_name, website, title)")
+    .eq("job_id", jobId)
+    .eq("status", "pending")
+    .order("due_at", { ascending: true })
+    .order("id", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw new Error(`get pending followup by job id: ${error.message}`);
+  return data ? normalizeFollowupRow(data as Record<string, any>) : undefined;
+}
+
+export async function updateFollowup(
+  db: DbClient,
   followupId: number,
   input: FollowupUpdateInput,
-): void {
-  const existing = getFollowupById(db, followupId);
+): Promise<void> {
+  const existing = await getFollowupById(db, followupId);
   if (!existing) {
     throw new Error(`Follow-up ${followupId} not found.`);
   }
 
-  db.prepare(
-    `UPDATE followups
-     SET due_at = COALESCE(?, due_at),
-         status = COALESCE(?, status),
-         note = COALESCE(?, note),
-         updated_at = datetime('now')
-     WHERE id = ?`,
-  ).run(input.dueAt ?? null, input.status ?? null, input.note ?? null, followupId);
+  const { error } = await db
+    .from("followups")
+    .update({
+      due_at: input.dueAt ?? existing.due_at,
+      status: input.status ?? existing.status,
+      note: input.note ?? existing.note,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", followupId);
+  assertNoError(error, "update followup", {});
 
   if (existing.application_id != null) {
     const eventType =
@@ -987,7 +1258,7 @@ export function updateFollowup(
           : input.dueAt
             ? "followup_rescheduled"
             : "followup_updated";
-    createApplicationEvent(
+    await createApplicationEvent(
       db,
       existing.application_id,
       eventType,
@@ -1003,110 +1274,76 @@ export function updateFollowup(
   }
 }
 
-export function getConversionStats(db: Database.Database): ConversionStats {
-  const row = db
-    .prepare(
-      `SELECT
-         COUNT(*) AS saved,
-         SUM(CASE WHEN status IN ('applied', 'followup_due', 'replied', 'interview', 'rejected', 'archived') THEN 1 ELSE 0 END) AS applied,
-         SUM(CASE WHEN status IN ('replied', 'interview', 'rejected', 'archived') THEN 1 ELSE 0 END) AS replied,
-         SUM(CASE WHEN status = 'interview' THEN 1 ELSE 0 END) AS interview
-       FROM applications`,
-    )
-    .get() as {
-      saved: number | null;
-      applied: number | null;
-      replied: number | null;
-      interview: number | null;
-    };
-
+export async function getConversionStats(db: DbClient): Promise<ConversionStats> {
+  const { data, error } = await db.from("applications").select("status");
+  const rows = assertNoError(error, "get conversion stats", data) as StatusRow[];
+  const statuses = rows.map((row: StatusRow) => row.status);
   return {
-    saved: row.saved ?? 0,
-    applied: row.applied ?? 0,
-    replied: row.replied ?? 0,
-    interview: row.interview ?? 0,
+    saved: statuses.length,
+    applied: statuses.filter((status) => ["applied", "followup_due", "replied", "interview", "rejected", "archived"].includes(status)).length,
+    replied: statuses.filter((status) => ["replied", "interview", "rejected", "archived"].includes(status)).length,
+    interview: statuses.filter((status) => status === "interview").length,
   };
 }
 
-export function getScoreRangeStats(db: Database.Database): ScoreRangeStats[] {
-  const rows = db
-    .prepare(
-      `SELECT
-         CASE
-           WHEN jobs.score >= 85 THEN '85-100'
-           WHEN jobs.score >= 70 THEN '70-84'
-           WHEN jobs.score >= 55 THEN '55-69'
-           ELSE '0-54'
-         END AS range,
-         COUNT(*) AS total,
-         SUM(CASE WHEN applications.status IN ('applied', 'followup_due', 'replied', 'interview', 'rejected', 'archived') THEN 1 ELSE 0 END) AS applied,
-         SUM(CASE WHEN applications.status IN ('replied', 'interview', 'rejected', 'archived') THEN 1 ELSE 0 END) AS replied,
-         SUM(CASE WHEN applications.status = 'interview' THEN 1 ELSE 0 END) AS interview
-       FROM jobs
-       LEFT JOIN applications ON applications.job_id = jobs.id
-       GROUP BY range
-       ORDER BY
-         CASE range
-           WHEN '85-100' THEN 1
-           WHEN '70-84' THEN 2
-           WHEN '55-69' THEN 3
-           ELSE 4
-         END`,
-    )
-    .all() as Array<{
-      range: string;
-      total: number | null;
-      applied: number | null;
-      replied: number | null;
-      interview: number | null;
-    }>;
+export async function getScoreRangeStats(db: DbClient): Promise<ScoreRangeStats[]> {
+  const jobs = await fetchJobsWithSource(db);
+  const { data, error } = await db.from("applications").select("job_id, status");
+  const applications = assertNoError(error, "get score range stats applications", data) as DbRow[];
+  const byJob = new Map<number, ApplicationStatus>((applications ?? []).map((row: DbRow) => [Number(row.job_id), row.status as ApplicationStatus]));
 
-  return rows.map((row) => ({
-    range: row.range,
-    total: row.total ?? 0,
-    applied: row.applied ?? 0,
-    replied: row.replied ?? 0,
-    interview: row.interview ?? 0,
-  }));
+  const buckets = new Map<string, ScoreRangeStats>();
+  const labelFor = (score: number): string => {
+    if (score >= 85) return "85-100";
+    if (score >= 70) return "70-84";
+    if (score >= 55) return "55-69";
+    return "0-54";
+  };
+
+  for (const job of jobs) {
+    const label = labelFor(job.score);
+    const bucket = buckets.get(label) ?? { range: label, total: 0, applied: 0, replied: 0, interview: 0 };
+    const status = byJob.get(job.id);
+    bucket.total += 1;
+    if (status && ["applied", "followup_due", "replied", "interview", "rejected", "archived"].includes(status)) bucket.applied += 1;
+    if (status && ["replied", "interview", "rejected", "archived"].includes(status)) bucket.replied += 1;
+    if (status === "interview") bucket.interview += 1;
+    buckets.set(label, bucket);
+  }
+
+  const order = ["85-100", "70-84", "55-69", "0-54"];
+  return order.map((label) => buckets.get(label) ?? { range: label, total: 0, applied: 0, replied: 0, interview: 0 });
 }
 
-export function getSourceStats(db: Database.Database): SourceStats[] {
-  const rows = db
-    .prepare(
-      `SELECT
-         job_sources.provider AS source,
-         COUNT(*) AS total,
-         SUM(CASE WHEN applications.status IN ('applied', 'followup_due', 'replied', 'interview', 'rejected', 'archived') THEN 1 ELSE 0 END) AS applied,
-         SUM(CASE WHEN applications.status IN ('replied', 'interview', 'rejected', 'archived') THEN 1 ELSE 0 END) AS replied,
-         SUM(CASE WHEN applications.status = 'interview' THEN 1 ELSE 0 END) AS interview
-       FROM jobs
-       JOIN job_sources ON job_sources.id = jobs.source_id
-       LEFT JOIN applications ON applications.job_id = jobs.id
-       GROUP BY job_sources.provider
-       ORDER BY total DESC, source ASC`,
-    )
-    .all() as Array<{
-      source: string;
-      total: number | null;
-      applied: number | null;
-      replied: number | null;
-      interview: number | null;
-    }>;
+export async function getSourceStats(db: DbClient): Promise<SourceStats[]> {
+  const jobs = await fetchJobsWithSource(db);
+  const { data, error } = await db.from("applications").select("job_id, status");
+  const applications = assertNoError(error, "get source stats applications", data) as DbRow[];
+  const byJob = new Map<number, ApplicationStatus>((applications ?? []).map((row: DbRow) => [Number(row.job_id), row.status as ApplicationStatus]));
 
-  return rows.map((row) => ({
-    source: row.source,
-    total: row.total ?? 0,
-    applied: row.applied ?? 0,
-    replied: row.replied ?? 0,
-    interview: row.interview ?? 0,
-  }));
+  const buckets = new Map<string, SourceStats>();
+  for (const job of jobs) {
+    const source = job.provider ?? "unknown";
+    const bucket = buckets.get(source) ?? { source, total: 0, applied: 0, replied: 0, interview: 0 };
+    const status = byJob.get(job.id);
+    bucket.total += 1;
+    if (status && ["applied", "followup_due", "replied", "interview", "rejected", "archived"].includes(status)) bucket.applied += 1;
+    if (status && ["replied", "interview", "rejected", "archived"].includes(status)) bucket.replied += 1;
+    if (status === "interview") bucket.interview += 1;
+    buckets.set(source, bucket);
+  }
+
+  return [...buckets.values()].sort((a, b) => b.total - a.total || a.source.localeCompare(b.source));
 }
 
-export function markJobStatus(
-  db: Database.Database,
+export async function markJobStatus(
+  db: DbClient,
   jobId: number,
   status: JobStatus,
-): void {
-  db.prepare(`UPDATE jobs SET status = ?, updated_at = datetime('now') WHERE id = ?`)
-    .run(status, jobId);
+): Promise<void> {
+  const { error } = await db
+    .from("jobs")
+    .update({ status, updated_at: new Date().toISOString() })
+    .eq("id", jobId);
+  assertNoError(error, "mark job status", {});
 }

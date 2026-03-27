@@ -122,6 +122,47 @@ const EMPTY_PAGE = `
 </html>
 `;
 
+const MICROSOFT_LIST_PAGE = `
+<!DOCTYPE html>
+<html>
+<head><title>Microsoft Careers</title></head>
+<body>
+  <div class="jobs">
+    <a href="https://apply.careers.microsoft.com/careers/job/1970393556852850?hl=en" aria-label="See details">See details</a>
+  </div>
+</body>
+</html>
+`;
+
+const MICROSOFT_DETAIL_PAGE = `
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Software Engineer II - M365 Copilot App | Microsoft Careers</title>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org/",
+    "@type": "JobPosting",
+    "title": "Software Engineer II - M365 Copilot App",
+    "datePosted": "2026-03-25T20:50:07",
+    "jobLocation": {
+      "@type": "Place",
+      "address": {
+        "@type": "PostalAddress",
+        "addressLocality": "Mountain View",
+        "addressRegion": "CA",
+        "addressCountry": "US"
+      }
+    },
+    "description": "Build AI-powered product experiences with TypeScript and distributed systems.",
+    "url": "https://apply.careers.microsoft.com/careers/job/1970393556852850?hl=en"
+  }
+  </script>
+</head>
+<body></body>
+</html>
+`;
+
 // ─── Mock fetch ────────────────────────────────────────────────
 
 function createMockFetch(
@@ -230,6 +271,28 @@ describe("careers scraper", () => {
       expect(titles).not.toContain("View All Jobs");
       // "About Us" doesn't match /jobs/ pattern at all
       expect(titles).not.toContain("About Us");
+    });
+
+    test("hydrates generic link titles from the detail page", async () => {
+      const microsoft: CareerPage = {
+        name: "Microsoft",
+        slug: "microsoft",
+        careersUrl: "https://careers.microsoft.com/professionals/us/en/l-bayarea",
+        selector: "auto",
+      };
+      const mockFetch = createMockFetch({
+        [microsoft.careersUrl]: { status: 200, body: MICROSOFT_LIST_PAGE },
+        "https://apply.careers.microsoft.com/careers/job/1970393556852850?hl=en": { status: 200, body: MICROSOFT_DETAIL_PAGE },
+      });
+
+      const result = await scrapeCareerPage(microsoft, mockFetch);
+
+      expect(result.strategy).toBe("link_pattern");
+      expect(result.roles).toHaveLength(1);
+      expect(result.roles[0].title).toBe("Software Engineer II - M365 Copilot App");
+      expect(result.roles[0].locations).toBe("Mountain View, CA, US");
+      expect(result.roles[0].postedAt).toBe("2026-03-26T03:50:07.000Z");
+      expect(result.roles[0].summary).toContain("TypeScript");
     });
   });
 

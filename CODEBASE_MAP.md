@@ -227,31 +227,16 @@ Requirements:
 
 ---
 
-## Prompt 6: SMS/Twilio Push Notification
+## Prompt 6: Keep Notifications Email-Only
 
 ```
-Build a notification module at src/integrations/twilio.ts.
+Keep notification delivery focused on Gmail email only.
 
 Requirements:
-1. Install twilio: npm install twilio
-
-2. Create the module with:
-   - Read from env: TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER, MY_PHONE_NUMBER
-   - export async function sendSMS(message: string): Promise<void>
-   - export async function sendDailyBriefingSMS(briefingUrl: string, newRoleCount: number, topScore: number): Promise<void>
-     This sends a message like: "☀️ 14 new roles today. Top score: 92 (Anthropic — SWE II). Doc: {url}"
-
-3. Add SMS notification to the briefing command:
-   After creating the Google Doc, call sendDailyBriefingSMS with the doc URL and summary stats.
-   Make this optional — only send if TWILIO_ACCOUNT_SID is configured. Log "SMS skipped: Twilio not configured" otherwise.
-
-4. Add a standalone command: npm run notify
-   - Just sends the SMS for the most recent briefing without re-running the scan
-   - Useful for testing
-
-5. Error handling: if Twilio fails, log the error but don't crash. The briefing doc is the primary output; SMS is a convenience notification.
-
-6. Write a test with a mocked Twilio client.
+1. Do not add SMS or provider-specific delivery to the core workflow.
+2. `briefing` should generate the daily summary and send the HTML email through Gmail.
+3. `notify` should resend the latest email briefing without rerunning the scan.
+4. Keep the env surface limited to email delivery plus pipeline infrastructure.
 ```
 
 ---
@@ -300,10 +285,6 @@ Requirements:
    GOOGLE_CLIENT_SECRET=
    GOOGLE_REFRESH_TOKEN=
    GOOGLE_DRIVE_FOLDER_ID=
-   TWILIO_ACCOUNT_SID=
-   TWILIO_AUTH_TOKEN=
-   TWILIO_FROM_NUMBER=
-   MY_PHONE_NUMBER=
    LITESTREAM_REPLICA_URL=
    CRON_SCHEDULE=0 14 * * *
 
@@ -440,6 +421,5 @@ This test validates that the entire pipeline from ingestion to briefing works en
 **Environment setup** you'll need before Prompt 5:
 - Google Cloud project with Docs + Drive + Gmail APIs enabled
 - OAuth2 credentials (or service account)
-- Twilio account (free tier works for testing)
 
 **After Prompt 7**, you can deploy and have a working daily pipeline even without Prompts 8-9.

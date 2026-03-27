@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { LeverCompany } from "../../config/lever-companies";
-import type { NormalizedOpportunity } from "./normalize";
+import { extractPostedAt, type NormalizedOpportunity } from "./normalize";
 import { RESUME_KEYWORDS, TIER1_TAGS, TIER2_TAGS } from "../../config/scoring";
 
 // ─── Lever API schemas ─────────────────────────────────────────
@@ -91,6 +91,7 @@ function normalizeLeverPosting(
   posting: LeverPosting,
 ): NormalizedOpportunity {
   const cats = posting.categories;
+  const rawPosting = posting as unknown as Record<string, unknown>;
 
   return {
     externalKey: `lever:${company.slug}:${posting.id}`,
@@ -101,6 +102,7 @@ function normalizeLeverPosting(
     locations: buildLocation(cats.location, cats.allLocations),
     remoteFlag: inferRemote(cats.location, cats.allLocations, cats.commitment),
     jobUrl: posting.hostedUrl,
+    postedAt: extractPostedAt(rawPosting, posting.descriptionPlain),
     seniorityHint: inferSeniority(posting.text, cats.commitment),
     extractedSkills: extractSkills(posting.text, posting.descriptionPlain),
   };

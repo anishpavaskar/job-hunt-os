@@ -10,6 +10,8 @@ export interface BriefingNewRole {
   applyLink: string | null;
   isProspect: boolean;
   remoteFlag: boolean;
+  discoveredDate: string;
+  postedDate: string | null;
   extractedSkills: string[];
   stackMatch: number;
   applicationStatus: string | null;
@@ -71,4 +73,14 @@ export interface BriefingData {
 
 export function countVisibleNewRoles(roles: BriefingNewRole[]): number {
   return roles.filter((role) => role.kind !== "overflow").length;
+}
+
+export function countActualNewRoles(roles: BriefingNewRole[]): number {
+  return roles.reduce((total, role) => {
+    if (role.kind !== "overflow") return total + 1;
+
+    const match = role.role.match(/^\+(\d+)\s+more roles?\s+at\s+/i);
+    if (!match) return total;
+    return total + Number(match[1]);
+  }, 0);
 }

@@ -2,9 +2,9 @@ import { Command } from "commander";
 import { initDb } from "../db";
 import { getDraftById, listDrafts } from "../db/repositories";
 
-export function runListDraftsCommand(query?: string): string[] {
-  const db = initDb();
-  const drafts = listDrafts(db, query);
+export async function runListDraftsCommand(query?: string): Promise<string[]> {
+  const db = await initDb();
+  const drafts = await listDrafts(db, query);
   return drafts.map((draft) => {
     const title = draft.title ? ` - ${draft.title}` : "";
     const application = draft.application_status ? ` | application=${draft.application_status}` : "";
@@ -13,9 +13,9 @@ export function runListDraftsCommand(query?: string): string[] {
   });
 }
 
-export function runShowDraftCommand(draftId: number): string {
-  const db = initDb();
-  const draft = getDraftById(db, draftId);
+export async function runShowDraftCommand(draftId: number): Promise<string> {
+  const db = await initDb();
+  const draft = await getDraftById(db, draftId);
   if (!draft) {
     throw new Error(`Draft ${draftId} not found.`);
   }
@@ -33,8 +33,8 @@ export function registerDraftsCommand(): Command {
     .command("list")
     .description("List saved drafts")
     .option("--query <text>", "filter drafts by company, role, or variant")
-    .action((opts: { query?: string }) => {
-      const lines = runListDraftsCommand(opts.query);
+    .action(async (opts: { query?: string }) => {
+      const lines = await runListDraftsCommand(opts.query);
       if (lines.length === 0) {
         console.log("No saved drafts.");
         return;
@@ -46,8 +46,8 @@ export function registerDraftsCommand(): Command {
     .command("show")
     .description("Show a saved draft")
     .argument("<draft-id>", "draft id")
-    .action((draftId: string) => {
-      console.log(runShowDraftCommand(parseInt(draftId, 10)));
+    .action(async (draftId: string) => {
+      console.log(await runShowDraftCommand(parseInt(draftId, 10)));
     });
 
   return command;

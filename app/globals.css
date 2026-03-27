@@ -1,0 +1,152 @@
+@import "tailwindcss";
+
+/* ─────────────────────────────────────────────────────────────
+   Design Tokens — Job Hunt OS
+   Industrial-minimal. Linear × Bloomberg Terminal.
+───────────────────────────────────────────────────────────── */
+:root {
+  --font-sans-stack: "Avenir Next", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --font-mono-stack: "SFMono-Regular", "Menlo", "Monaco", "Consolas", monospace;
+
+  /* Backgrounds */
+  --void:      #0A0A0B;
+  --surface:   #141416;
+  --surface-2: #1A1A1E;
+  --surface-3: #202024;
+
+  /* Borders */
+  --edge:   #1E1E22;
+  --edge-2: #2A2A30;
+
+  /* Text */
+  --fg:   #EBEBED;
+  --fg-2: #8E8E95;
+  --fg-3: #4A4A52;
+  --fg-4: #252528;
+
+  /* Accents */
+  --blue:   #3B82F6;
+  --amber:  #F59E0B;
+  --green:  #10B981;
+  --red:    #EF4444;
+  --orange: #F97316;
+}
+
+/* ─── Tailwind v4: map tokens → utilities ─── */
+@theme inline {
+  --color-void:      var(--void);
+  --color-surface:   var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+
+  --color-edge:   var(--edge);
+  --color-edge-2: var(--edge-2);
+
+  --color-fg:   var(--fg);
+  --color-fg-2: var(--fg-2);
+  --color-fg-3: var(--fg-3);
+  --color-fg-4: var(--fg-4);
+
+  --color-blue:   var(--blue);
+  --color-amber:  var(--amber);
+  --color-green:  var(--green);
+  --color-red:    var(--red);
+  --color-orange: var(--orange);
+
+  --font-sans: var(--font-sans-stack);
+  --font-mono: var(--font-mono-stack);
+}
+
+/* ─── Base reset ─── */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  color-scheme: dark;
+  min-height: 100%;
+}
+
+body {
+  min-height: 100dvh;
+  background-color: var(--void);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ─── Scrollbar ─── */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: var(--void);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--edge-2);
+  border-radius: 2px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--fg-3);
+}
+
+/* ─── Selection ─── */
+::selection {
+  background: color-mix(in srgb, var(--blue) 25%, transparent);
+  color: var(--fg);
+}
+
+/* ─── Focus ring ─── */
+*:focus-visible {
+  outline: 1px solid var(--blue);
+  outline-offset: 2px;
+}
+
+/* ─── Animations ─── */
+@keyframes toast-enter {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.toast-enter {
+  animation: toast-enter 0.14s ease-out forwards;
+}
+
+@keyframes row-expand {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.row-expand {
+  animation: row-expand 0.12s ease-out forwards;
+}
+
+@keyframes drawer-enter {
+  from { opacity: 0; transform: translateX(18px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+.drawer-enter {
+  animation: drawer-enter 0.16s ease-out forwards;
+}
+
+.job-detail-drawer {
+  margin: 0;
+  border: 0;
+  background: transparent;
+}
+
+.job-detail-drawer::backdrop {
+  background: rgba(10, 10, 11, 0.56);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toast-enter,
+  .row-expand,
+  .drawer-enter {
+    animation: none;
+  }
+}

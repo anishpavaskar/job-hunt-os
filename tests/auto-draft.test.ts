@@ -83,14 +83,14 @@ describe("auto-draft batch flow", () => {
     });
 
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
-    const scanId = createScan(db, "manual", new Date().toISOString());
-    const sourceId = upsertJobSource(db, {
+    const scanId = await createScan(db, "manual", new Date().toISOString());
+    const sourceId = await upsertJobSource(db, {
       provider: "manual",
       externalId: "seed",
       url: "https://example.com/jobs",
     });
 
-    const eligibleJobId = upsertJob(db, {
+    const eligibleJobId = await upsertJob(db, {
       sourceId,
       scanId,
       externalKey: "manual:eligible",
@@ -119,7 +119,7 @@ describe("auto-draft batch flow", () => {
       status: "new",
     });
 
-    const lowScoreJobId = upsertJob(db, {
+    const lowScoreJobId = await upsertJob(db, {
       sourceId,
       scanId,
       externalKey: "manual:lowscore",
@@ -148,7 +148,7 @@ describe("auto-draft batch flow", () => {
       status: "new",
     });
 
-    const existingDraftJobId = upsertJob(db, {
+    const existingDraftJobId = await upsertJob(db, {
       sourceId,
       scanId,
       externalKey: "manual:existing",
@@ -176,13 +176,13 @@ describe("auto-draft batch flow", () => {
       riskBullets: [],
       status: "new",
     });
-    upsertDraft(db, {
+    await upsertDraft(db, {
       jobId: existingDraftJobId,
       variant: "default",
       generatedContent: "Existing draft",
     });
 
-    expect(listAutoDraftJobs(db, 80).map((job) => job.id)).toEqual([eligibleJobId]);
+    expect((await listAutoDraftJobs(db, 80)).map((job) => job.id)).toEqual([eligibleJobId]);
 
     const result = await runAutoDraftCommand({
       minScore: 80,
@@ -193,22 +193,22 @@ describe("auto-draft batch flow", () => {
 
     expect(result).toEqual({ generated: 1, gmailCreated: 1, skipped: 0 });
 
-    const application = getApplicationByJobId(db, eligibleJobId);
+    const application = await getApplicationByJobId(db, eligibleJobId);
     expect(application?.status).toBe("drafted");
     expect(application?.outreach_draft_version).toBe("auto-v1");
 
-    const drafts = listDrafts(db, "Scale AI");
+    const drafts = await listDrafts(db, "Scale AI");
     expect(drafts).toHaveLength(1);
     expect(drafts[0].gmail_draft_id).toBe("gmail-1");
 
-    const detail = getDraftById(db, drafts[0].id);
+    const detail = await getDraftById(db, drafts[0].id);
     expect(detail?.generated_content).toContain("I’m excited");
 
-    const events = getApplicationEvents(db, application!.id);
+    const events = await getApplicationEvents(db, application!.id);
     expect(events.some((event) => event.event_type === "status_changed" && event.next_status === "drafted")).toBe(true);
     expect(events.some((event) => event.event_type === "draft_saved")).toBe(true);
 
-    expect(getApplicationByJobId(db, lowScoreJobId)).toBeUndefined();
+    expect(await getApplicationByJobId(db, lowScoreJobId)).toBeUndefined();
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });

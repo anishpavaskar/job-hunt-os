@@ -6,6 +6,9 @@ import {
   ROLE_KEYWORDS,
   SCORING_WEIGHTS,
   SENIORITY_KEYWORDS,
+  STRONG_MISMATCH_TITLE_KEYWORDS,
+  MODERATE_MISMATCH_TITLE_KEYWORDS,
+  IC_TITLE_KEYWORDS,
   TIER1_TAGS,
   TIER2_TAGS,
 } from "../../config/scoring";
@@ -48,6 +51,30 @@ function collectMatches(text: string, values: readonly string[]): string[] {
   return [...new Set(values.filter((value) => containsCI(text, value)))];
 }
 
+const DAY_IN_MS = 1000 * 60 * 60 * 24;
+
+function getPostedDaysAgo(opportunity: NormalizedOpportunity): number | null {
+  if (!opportunity.postedAt) return null;
+
+  const postedDate = new Date(opportunity.postedAt);
+  if (Number.isNaN(postedDate.getTime())) return null;
+
+  const now = new Date();
+  const diffMs = now.getTime() - postedDate.getTime();
+  return Math.max(0, Math.floor(diffMs / DAY_IN_MS));
+}
+
+function scorePostedDateFreshness(opportunity: NormalizedOpportunity): number {
+  const daysAgo = getPostedDaysAgo(opportunity);
+  if (daysAgo == null) return 0;
+
+  if (daysAgo <= 3) return 7;
+  if (daysAgo <= 7) return 5;
+  if (daysAgo <= 14) return 3;
+  if (daysAgo <= 30) return 1;
+  return 0;
+}
+
 function buildOpportunityText(company: YcCompany, opportunity: NormalizedOpportunity): string {
   return collapseWhitespace(
     opportunity.title,
@@ -83,9 +110,10 @@ function scoreProfileLocation(company: YcCompany, profile?: Profile): number {
   return 0;
 }
 
-function scoreFreshness(company: YcCompany): number {
+function scoreFreshness(company: YcCompany, opportunity: NormalizedOpportunity): number {
   let score = 0;
   if (RECENT_BATCHES.includes(company.batch)) score += 7;
+  score += scorePostedDateFreshness(opportunity);
   if (company.isHiring) score += 3;
   return clamp(score, SCORING_WEIGHTS.freshness);
 }
@@ -121,6 +149,30 @@ function scoreStackFit(company: YcCompany, opportunity: NormalizedOpportunity, p
   return clamp(tier1Score + tier2Score + domainScore + practiceScore + resumeScore, SCORING_WEIGHTS.stackFit);
 }
 
+function getTitleMismatchPenalty(opportunity: NormalizedOpportunity): number {
+  const title = normalizeText(opportunity.title);
+  if (!title) return 0;
+
+  let penalty = 0;
+  penalty += matchCount(title, STRONG_MISMATCH_TITLE_KEYWORDS) * 18;
+  penalty += matchCount(title, MODERATE_MISMATCH_TITLE_KEYWORDS) * 10;
+
+  if (containsCI(title, "engineering manager")) penalty += 8;
+  if (containsCI(title, "lead") && !containsCI(title, "tech lead") && !containsCI(title, "technical lead")) penalty += 4;
+
+  return penalty;
+}
+
+function hasICTitleSignal(opportunity: NormalizedOpportunity): boolean {
+  const title = normalizeText(opportunity.title);
+  if (!title) return false;
+  return IC_TITLE_KEYWORDS.some((keyword) => containsCI(title, keyword));
+}
+
+function isStrongTitleMismatch(opportunity: NormalizedOpportunity): boolean {
+  return getTitleMismatchPenalty(opportunity) >= 18 && !hasICTitleSignal(opportunity);
+}
+
 function scoreRoleFit(opportunity: NormalizedOpportunity, profile?: Profile): number {
   const text = normalizeText(opportunity.title, opportunity.summary);
   let score = 0;
@@ -144,7 +196,18 @@ function scoreRoleFit(opportunity: NormalizedOpportunity, profile?: Profile): nu
 
   if (profile?.preferences?.healthcare && containsCI(text, "health")) score += 3;
   if (profile?.preferences?.remote && opportunity.remoteFlag) score += 2;
+  score -= getTitleMismatchPenalty(opportunity);
+  if (isStrongTitleMismatch(opportunity)) {
+    score = Math.min(score, 6);
+  }
   return clamp(score, SCORING_WEIGHTS.roleFit);
+}
+
+function adjustStackFitForTitle(opportunity: NormalizedOpportunity, score: number): number {
+  if (isStrongTitleMismatch(opportunity)) {
+    return Math.min(score, 8);
+  }
+  return score;
 }
 
 function inferProfileSeniority(profile?: Profile): "junior" | "mid" | "senior" {
@@ -188,11 +251,16 @@ function buildExplanationBullets(
   profile?: Profile,
 ): string[] {
   const bullets: string[] = [];
+  const postedDaysAgo = getPostedDaysAgo(opportunity);
   if (breakdown.roleFit >= 12 && opportunity.title) bullets.push(`Strong role fit for ${opportunity.title}`);
   if (breakdown.stackFit >= 18) bullets.push("Stack aligns well with your core skills");
   if (breakdown.companySignal >= 12 && company.top_company) bullets.push("Strong company signal from YC and hiring posture");
   if (breakdown.prospect_listed) bullets.push("Prospect-curated top startup");
-  if (breakdown.freshness >= 7) bullets.push(`Fresh enough to prioritize from ${company.batch}`);
+  if (breakdown.freshness >= 5 && postedDaysAgo != null && postedDaysAgo <= 30) {
+    bullets.push(`Posted ${postedDaysAgo} days ago - still fresh`);
+  } else if (breakdown.freshness >= 7) {
+    bullets.push(`Fresh enough to prioritize from ${company.batch}`);
+  }
   if (opportunity.remoteFlag) bullets.push("Remote-friendly role");
   if (profile?.target_roles?.some((role) => containsCI(opportunity.title ?? "", role))) {
     bullets.push("Matches one of your target role families");
@@ -207,12 +275,21 @@ function buildRiskBullets(
 ): string[] {
   const risks: string[] = [];
   const seniorityText = opportunity.seniorityHint?.toLowerCase() ?? "";
+  const titleText = normalizeText(opportunity.title);
+  const postedDaysAgo = getPostedDaysAgo(opportunity);
+  if (getTitleMismatchPenalty(opportunity) >= 18) {
+    risks.push("Role appears less aligned with an IC backend/platform target");
+  }
   if (["staff", "principal", "director"].some((keyword) => seniorityText.includes(keyword)) && breakdown.seniorityFit <= 4) {
     risks.push("Likely too senior for your current target level");
+  }
+  if (containsCI(titleText, "manager") && !containsCI(titleText, "product manager")) {
+    risks.push("Management-heavy role may be a poor IC fit");
   }
   if (breakdown.seniorityFit <= 6) risks.push("Seniority fit is uncertain");
   if (!opportunity.remoteFlag) risks.push("Not clearly remote");
   if ((opportunity.compensationMin ?? opportunity.compensationMax) == null) risks.push("Compensation not disclosed");
+  if (postedDaysAgo != null && postedDaysAgo > 30) risks.push(`Posted ${postedDaysAgo} days ago - may no longer be active`);
   if (!RECENT_BATCHES.includes(company.batch)) risks.push(`Older batch (${company.batch}) may be lower-priority`);
   return risks.slice(0, 2);
 }
@@ -225,9 +302,9 @@ function buildBreakdown(
   const prospectListed = isProspectCompany(company.name);
   return {
     roleFit: scoreRoleFit(opportunity, profile),
-    stackFit: scoreStackFit(company, opportunity, profile),
+    stackFit: adjustStackFitForTitle(opportunity, scoreStackFit(company, opportunity, profile)),
     seniorityFit: scoreSeniorityFit(opportunity, profile),
-    freshness: scoreFreshness(company),
+    freshness: scoreFreshness(company, opportunity),
     companySignal: clamp(
       scoreCompanySignal(company, opportunity)
         + scoreProfileLocation(company, profile)
@@ -333,6 +410,7 @@ export function scoreOpportunity(
 ): OpportunityScore {
   const breakdown = buildBreakdown(company, opportunity, profile);
   const prospectListed = Boolean(breakdown.prospect_listed);
+  const titlePenalty = isStrongTitleMismatch(opportunity) ? 20 : getTitleMismatchPenalty(opportunity) >= 10 ? 10 : 0;
 
   const reasons = [
     `role_fit:${breakdown.roleFit}`,
@@ -340,6 +418,7 @@ export function scoreOpportunity(
     `seniority_fit:${breakdown.seniorityFit}`,
     `freshness:${breakdown.freshness}`,
     `company_signal:${breakdown.companySignal}`,
+    ...(titlePenalty > 0 ? [`title_penalty:-${titlePenalty}`] : []),
     ...(prospectListed ? ["Prospect-curated top startup"] : []),
   ];
 
@@ -348,7 +427,8 @@ export function scoreOpportunity(
     breakdown.stackFit +
     breakdown.seniorityFit +
     breakdown.freshness +
-    breakdown.companySignal;
+    breakdown.companySignal -
+    titlePenalty;
   return {
     score: clamp(score, 100),
     reasons,

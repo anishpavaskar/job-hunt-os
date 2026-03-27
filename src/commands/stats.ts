@@ -7,11 +7,11 @@ function percent(numerator: number, denominator: number): string {
   return `${((numerator / denominator) * 100).toFixed(1)}%`;
 }
 
-export function runStatsCommand(): string {
-  const db = initDb();
-  const conversion = getConversionStats(db);
-  const scoreRanges = getScoreRangeStats(db);
-  const sources = getSourceStats(db);
+export async function runStatsCommand(): Promise<string> {
+  const db = await initDb();
+  const conversion = await getConversionStats(db);
+  const scoreRanges = await getScoreRangeStats(db);
+  const sources = await getSourceStats(db);
 
   const lines: string[] = [];
   lines.push("Conversion Funnel");
@@ -39,7 +39,7 @@ export function runStatsCommand(): string {
 export function registerStatsCommand(): Command {
   return new Command("stats")
     .description("Show job hunt conversion rates and analytics")
-    .action(() => {
-      console.log(runStatsCommand());
+    .action(async () => {
+      console.log(await runStatsCommand());
     });
 }

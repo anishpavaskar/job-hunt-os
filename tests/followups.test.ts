@@ -18,20 +18,20 @@ describe("followups command", () => {
   let tmpDir: string;
   let previousCwd: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     previousCwd = process.cwd();
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "job-hunt-followups-"));
     fs.mkdirSync(path.join(tmpDir, "data"), { recursive: true });
     process.chdir(tmpDir);
     resetDb();
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
-    const scanId = createScan(db, "yc", new Date().toISOString());
-    const sourceId = upsertJobSource(db, {
+    const scanId = await createScan(db, "yc", new Date().toISOString());
+    const sourceId = await upsertJobSource(db, {
       provider: "yc",
       externalId: "follow-co",
       url: "https://yc.com/follow-co",
     });
-    const jobId = upsertJob(db, {
+    const jobId = await upsertJob(db, {
       sourceId,
       scanId,
       externalKey: "role:follow-co:devops",
@@ -58,11 +58,11 @@ describe("followups command", () => {
       topCompany: false,
       isHiring: true,
     });
-    const applicationId = upsertApplication(db, jobId, {
+    const applicationId = await upsertApplication(db, jobId, {
       status: "applied",
       appliedAt: "2026-03-20T00:00:00.000Z",
     });
-    createFollowup(db, jobId, applicationId, "2026-03-27T00:00:00.000Z", "Check in");
+    await createFollowup(db, jobId, applicationId, "2026-03-27T00:00:00.000Z", "Check in");
   });
 
   afterEach(() => {
@@ -70,30 +70,30 @@ describe("followups command", () => {
     closeDb();
   });
 
-  test("lists pending followups in readable lines", () => {
-    const lines = runFollowupsCommand();
+  test("lists pending followups in readable lines", async () => {
+    const lines = await runFollowupsCommand();
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain("#");
     expect(lines[0]).toContain("FollowCo");
   });
 
-  test("can mark followups done, skipped, or rescheduled", () => {
-    const list = runFollowupsCommand();
+  test("can mark followups done, skipped, or rescheduled", async () => {
+    const list = await runFollowupsCommand();
     const id = parseInt(list[0].split("|")[0].replace("#", "").trim(), 10);
 
-    expect(runFollowupAction(id, "reschedule", 4, "Push by a few days")).toContain("Rescheduled");
+    expect(await runFollowupAction(id, "reschedule", 4, "Push by a few days")).toContain("Rescheduled");
     let db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
-    let updated = getFollowupById(db, id);
+    let updated = await getFollowupById(db, id);
     expect(updated?.status).toBe("pending");
     expect(updated?.note).toBe("Push by a few days");
 
-    expect(runFollowupAction(id, "done", undefined, "Sent follow-up")).toContain("Marked");
+    expect(await runFollowupAction(id, "done", undefined, "Sent follow-up")).toContain("Marked");
     db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
-    updated = getFollowupById(db, id);
+    updated = await getFollowupById(db, id);
     expect(updated?.status).toBe("done");
 
-    const job = getApplicationByJobId(db, updated!.job_id);
-    const events = getApplicationEvents(db, job!.id);
+    const job = await getApplicationByJobId(db, updated!.job_id);
+    const events = await getApplicationEvents(db, job!.id);
     expect(events.some((event) => event.event_type === "followup_rescheduled")).toBe(true);
     expect(events.some((event) => event.event_type === "followup_done")).toBe(true);
   });

@@ -35,10 +35,10 @@ describe("SQLite persistence", () => {
     expect(row).toBeTruthy();
   });
 
-  test("upserts repeated jobs without duplication", () => {
+  test("upserts repeated jobs without duplication", async () => {
     const db = initDb(dbPath);
-    const scanId = createScan(db, "yc", new Date().toISOString());
-    const sourceId = upsertJobSource(db, {
+    const scanId = await createScan(db, "yc", new Date().toISOString());
+    const sourceId = await upsertJobSource(db, {
       provider: "yc",
       externalId: "acme",
       url: "https://yc.com/acme",
@@ -78,24 +78,24 @@ describe("SQLite persistence", () => {
       status: "new" as const,
     };
 
-    upsertJob(db, input);
-    upsertJob(db, { ...input, score: 82 });
-    completeScan(db, scanId, 1, 1, new Date().toISOString());
+    await upsertJob(db, input);
+    await upsertJob(db, { ...input, score: 82 });
+    await completeScan(db, scanId, 1, 1, new Date().toISOString());
 
-    const rows = listJobs(db, { limit: 10 });
+    const rows = await listJobs(db, { limit: 10 });
     expect(rows).toHaveLength(1);
     expect(rows[0].score).toBe(82);
   });
 
-  test("creates applications and pending followups", () => {
+  test("creates applications and pending followups", async () => {
     const db = initDb(dbPath);
-    const scanId = createScan(db, "yc", new Date().toISOString());
-    const sourceId = upsertJobSource(db, {
+    const scanId = await createScan(db, "yc", new Date().toISOString());
+    const sourceId = await upsertJobSource(db, {
       provider: "yc",
       externalId: "apply-co",
       url: "https://yc.com/apply-co",
     });
-    const jobId = upsertJob(db, {
+    const jobId = await upsertJob(db, {
       sourceId,
       scanId,
       externalKey: "company:apply-co",
@@ -127,7 +127,7 @@ describe("SQLite persistence", () => {
       isHiring: true,
     });
 
-    const applicationId = upsertApplication(db, jobId, {
+    const applicationId = await upsertApplication(db, jobId, {
       status: "applied",
       appliedAt: new Date().toISOString(),
       note: "Reached out to hiring manager",
@@ -135,27 +135,27 @@ describe("SQLite persistence", () => {
       resumeVersion: "resume-v2",
       outreachDraftVersion: "draft-v1",
     });
-    createFollowup(db, jobId, applicationId, "2026-04-01T00:00:00.000Z", "Send follow-up");
+    await createFollowup(db, jobId, applicationId, "2026-04-01T00:00:00.000Z", "Send follow-up");
 
-    const followups = listPendingFollowups(db);
+    const followups = await listPendingFollowups(db);
     expect(followups).toHaveLength(1);
     expect(followups[0].company_name).toBe("ApplyCo");
-    const events = getApplicationEvents(db, applicationId);
+    const events = await getApplicationEvents(db, applicationId);
     expect(events).toHaveLength(2);
     expect(events[0].next_status).toBe("applied");
     expect(events[1].event_type).toBe("followup_created");
   });
 
-  test("stores multiple roles for one company source", () => {
+  test("stores multiple roles for one company source", async () => {
     const db = initDb(dbPath);
-    const scanId = createScan(db, "yc", new Date().toISOString());
-    const sourceId = upsertJobSource(db, {
+    const scanId = await createScan(db, "yc", new Date().toISOString());
+    const sourceId = await upsertJobSource(db, {
       provider: "yc",
       externalId: "multi-role",
       url: "https://yc.com/multi-role",
     });
 
-    upsertJob(db, {
+    await upsertJob(db, {
       sourceId,
       scanId,
       externalKey: "role:multi-role:backend",
@@ -182,7 +182,7 @@ describe("SQLite persistence", () => {
       topCompany: false,
       isHiring: true,
     });
-    upsertJob(db, {
+    await upsertJob(db, {
       sourceId,
       scanId,
       externalKey: "role:multi-role:infra",
@@ -210,21 +210,21 @@ describe("SQLite persistence", () => {
       isHiring: true,
     });
 
-    const rows = listJobs(db, { limit: 10 });
+    const rows = await listJobs(db, { limit: 10 });
     expect(rows).toHaveLength(2);
     expect(rows[0].title).toBe("Infra Engineer");
   });
 
-  test("prioritizes real role rows over fallback rows and picks the highest-scoring role match", () => {
+  test("prioritizes real role rows over fallback rows and picks the highest-scoring role match", async () => {
     const db = initDb(dbPath);
-    const scanId = createScan(db, "yc", new Date().toISOString());
-    const sourceId = upsertJobSource(db, {
+    const scanId = await createScan(db, "yc", new Date().toISOString());
+    const sourceId = await upsertJobSource(db, {
       provider: "yc",
       externalId: "ambiguity-co",
       url: "https://yc.com/ambiguity-co",
     });
 
-    upsertJob(db, {
+    await upsertJob(db, {
       sourceId,
       scanId,
       externalKey: "company:ambiguity-co",
@@ -249,7 +249,7 @@ describe("SQLite persistence", () => {
       topCompany: true,
       isHiring: true,
     });
-    upsertJob(db, {
+    await upsertJob(db, {
       sourceId,
       scanId,
       externalKey: "greenhouse:ambiguity-co:1",
@@ -276,7 +276,7 @@ describe("SQLite persistence", () => {
       topCompany: false,
       isHiring: true,
     });
-    upsertJob(db, {
+    await upsertJob(db, {
       sourceId,
       scanId,
       externalKey: "lever:ambiguity-co:2",
@@ -304,12 +304,12 @@ describe("SQLite persistence", () => {
       isHiring: true,
     });
 
-    const rows = listJobs(db, { limit: 10 });
+    const rows = await listJobs(db, { limit: 10 });
     expect(rows[0].external_key).toBe("lever:ambiguity-co:2");
     expect(rows[1].external_key).toBe("greenhouse:ambiguity-co:1");
     expect(rows[2].external_key).toBe("company:ambiguity-co");
 
-    const resolved = getJobByQuery(db, "AmbiguityCo");
+    const resolved = await getJobByQuery(db, "AmbiguityCo");
     expect(resolved?.external_key).toBe("lever:ambiguity-co:2");
   });
 });

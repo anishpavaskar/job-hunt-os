@@ -1,11 +1,11 @@
 import { Command } from "commander";
 import { execSync } from "child_process";
 import fs from "fs";
-import Database from "better-sqlite3";
 import { HEALTH_KEYWORDS } from "../../config/scoring";
 import { loadProfile } from "../config/profile";
 import type { Profile } from "../config/types";
 import { initDb } from "../db";
+import type { DbClient } from "../db/client";
 import { getApplicationByJobId, getJobByQuery, upsertApplication, upsertDraft } from "../db/repositories";
 import { JobRecord } from "../db/types";
 import { createGmailDraft } from "../integrations/gmail";
@@ -24,14 +24,6 @@ const HOOKS = {
     "At Dell EMC, I built Go microservices for a zero-downtime K8s upgrade platform, owned a Python SDK framework for global teams, and modernized CI/CD pipelines that doubled deployment cadence.",
 } as const;
 
-function parseJsonArray(value: string): string[] {
-  try {
-    return JSON.parse(value) as string[];
-  } catch {
-    return [];
-  }
-}
-
 function pickHookType(tags: string[]): keyof typeof HOOKS {
   const lower = tags.map((tag) => tag.toLowerCase());
   if (INFRA_TAGS.some((tag) => lower.includes(tag.toLowerCase()))) return "infra";
@@ -41,7 +33,7 @@ function pickHookType(tags: string[]): keyof typeof HOOKS {
 }
 
 export function generateDraft(job: JobRecord): string {
-  const tags = parseJsonArray(job.tags_json);
+  const tags = job.tags_json;
   const hook = HOOKS[pickHookType(tags)];
   const teamLine =
     job.team_size != null && job.team_size <= 50
@@ -75,9 +67,9 @@ ${profileBlock}`;
 }
 
 function buildAnthropicUserPrompt(job: JobRecord): string {
-  const extractedSkills = parseJsonArray(job.extracted_skills_json);
-  const reasons = parseJsonArray(job.explanation_bullets_json);
-  const risks = parseJsonArray(job.risk_bullets_json);
+  const extractedSkills = job.extracted_skills_json;
+  const reasons = job.explanation_bullets_json;
+  const risks = job.risk_bullets_json;
 
   return `Write a concise outreach email for this opportunity.
 
@@ -85,7 +77,7 @@ Company: ${job.company_name}
 Role title: ${job.title ?? "General software role"}
 Summary: ${job.summary}
 Location: ${job.locations}
-Remote: ${job.remote_flag === 1 ? "yes" : "no / unclear"}
+Remote: ${job.remote_flag ? "yes" : "no / unclear"}
 Job URL: ${job.job_url}
 Extracted skills: ${extractedSkills.join(", ") || "None"}
 Score reasons: ${reasons.join("; ") || "None"}
@@ -157,7 +149,7 @@ export function buildDraftSubject(job: JobRecord): string {
 }
 
 export async function saveDraftForJob(
-  db: Database.Database,
+  db: DbClient,
   job: JobRecord,
   opts: {
     variant?: string;
@@ -172,15 +164,15 @@ export async function saveDraftForJob(
   const draftContent = opts.generatedContent ?? await generatePersonalizedDraft(job, { fetchImpl: opts.fetchImpl });
   const editedContent = opts.editedContent ?? null;
 
-  let application = getApplicationByJobId(db, job.id);
+  let application = await getApplicationByJobId(db, job.id);
   let applicationId = application?.id ?? null;
   if (opts.markDrafted) {
-    applicationId = upsertApplication(db, job.id, {
+    applicationId = await upsertApplication(db, job.id, {
       status: "drafted",
       note: opts.notes,
       outreachDraftVersion: opts.variant ?? "default",
     });
-    application = getApplicationByJobId(db, job.id);
+    application = await getApplicationByJobId(db, job.id);
     applicationId = application?.id ?? applicationId;
   }
 
@@ -189,7 +181,7 @@ export async function saveDraftForJob(
     gmailDraftId = await createGmailDraft("", buildDraftSubject(job), editedContent ?? draftContent);
   }
 
-  const draftId = upsertDraft(db, {
+  const draftId = await upsertDraft(db, {
     jobId: job.id,
     applicationId,
     variant: opts.variant ?? "default",
@@ -218,10 +210,10 @@ export async function runDraftCommand(
     fetchImpl?: typeof fetch;
   } = {},
 ): Promise<string> {
-  const db = initDb();
-  const job = getJobByQuery(db, query);
+  const db = await initDb();
+  const job = await getJobByQuery(db, query);
   if (!job) {
-    throw new Error(`No job matching "${query}" found in SQLite. Run scan first.`);
+    throw new Error(`No job matching "${query}" found in Supabase. Run scan first.`);
   }
 
   const editedContent = opts.editedFile ? fs.readFileSync(opts.editedFile, "utf-8") : null;

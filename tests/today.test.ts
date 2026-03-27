@@ -43,14 +43,14 @@ describe("today command", () => {
     resetDb();
 
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
-    const scanId = createScan(db, "manual", new Date().toISOString());
+    const scanId = await createScan(db, "manual", new Date().toISOString());
 
-    const followupSourceId = upsertJobSource(db, {
+    const followupSourceId = await upsertJobSource(db, {
       provider: "manual",
       externalId: "followup-source",
       url: "https://example.com/followup",
     });
-    const followupJobId = upsertJob(db, {
+    const followupJobId = await upsertJob(db, {
       sourceId: followupSourceId,
       scanId,
       externalKey: "manual:followup-source",
@@ -77,18 +77,18 @@ describe("today command", () => {
       explanationBullets: ["Strong infra fit"],
       riskBullets: ["Compensation not disclosed"],
     });
-    const followupApplicationId = upsertApplication(db, followupJobId, {
+    const followupApplicationId = await upsertApplication(db, followupJobId, {
       status: "applied",
       appliedAt: "2026-03-20T00:00:00.000Z",
     });
-    createFollowup(db, followupJobId, followupApplicationId, "2026-03-24T00:00:00.000Z", "Check in now");
+    await createFollowup(db, followupJobId, followupApplicationId, "2026-03-24T00:00:00.000Z", "Check in now");
 
-    const draftSourceId = upsertJobSource(db, {
+    const draftSourceId = await upsertJobSource(db, {
       provider: "manual",
       externalId: "draft-source",
       url: "https://example.com/draft",
     });
-    const draftJobId = upsertJob(db, {
+    const draftJobId = await upsertJob(db, {
       sourceId: draftSourceId,
       scanId,
       externalKey: "manual:draft-source",
@@ -115,18 +115,18 @@ describe("today command", () => {
       explanationBullets: ["Role fit is unusually strong"],
       riskBullets: ["Onsite expectations are unclear"],
     });
-    upsertApplication(db, draftJobId, {
+    await upsertApplication(db, draftJobId, {
       status: "drafted",
       note: "Nearly ready to submit",
     });
     await runDraftCommand("Senior Backend Engineer", { save: true, variant: "v1" });
 
-    const applySourceId = upsertJobSource(db, {
+    const applySourceId = await upsertJobSource(db, {
       provider: "manual",
       externalId: "apply-source",
       url: "https://example.com/apply",
     });
-    upsertJob(db, {
+    await upsertJob(db, {
       sourceId: applySourceId,
       scanId,
       externalKey: "manual:apply-source",
@@ -161,8 +161,8 @@ describe("today command", () => {
     closeDb();
   });
 
-  test("prioritizes urgent follow-ups, then ready drafts, then strong unapplied jobs", () => {
-    const lines = runTodayCommand({ limit: "3" });
+  test("prioritizes urgent follow-ups, then ready drafts, then strong unapplied jobs", async () => {
+    const lines = await runTodayCommand({ limit: "3" });
 
     expect(lines).toHaveLength(3);
     expect(lines[0]).toContain("FollowFirst");
@@ -187,16 +187,16 @@ describe("today command", () => {
     expect(lines[2]).toContain("apply today");
   });
 
-  test("filters weak technical matches and keeps stronger technical apply targets ahead of soft-signal matches", () => {
+  test("filters weak technical matches and keeps stronger technical apply targets ahead of soft-signal matches", async () => {
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
-    const scanId = createScan(db, "manual", new Date().toISOString());
+    const scanId = await createScan(db, "manual", new Date().toISOString());
 
-    const filteredSourceId = upsertJobSource(db, {
+    const filteredSourceId = await upsertJobSource(db, {
       provider: "manual",
       externalId: "filtered-source",
       url: "https://example.com/filtered",
     });
-    upsertJob(db, {
+    await upsertJob(db, {
       sourceId: filteredSourceId,
       scanId,
       externalKey: "manual:filtered-source",
@@ -228,12 +228,12 @@ describe("today command", () => {
       riskBullets: ["Technical fit is still unclear"],
     });
 
-    const softSignalSourceId = upsertJobSource(db, {
+    const softSignalSourceId = await upsertJobSource(db, {
       provider: "manual",
       externalId: "soft-signal-source",
       url: "https://example.com/soft-signal",
     });
-    upsertJob(db, {
+    await upsertJob(db, {
       sourceId: softSignalSourceId,
       scanId,
       externalKey: "manual:soft-signal-source",
@@ -265,12 +265,12 @@ describe("today command", () => {
       riskBullets: ["Technical fit is still unclear"],
     });
 
-    const deepFitSourceId = upsertJobSource(db, {
+    const deepFitSourceId = await upsertJobSource(db, {
       provider: "manual",
       externalId: "deep-fit-source",
       url: "https://example.com/deep-fit",
     });
-    upsertJob(db, {
+    await upsertJob(db, {
       sourceId: deepFitSourceId,
       scanId,
       externalKey: "manual:deep-fit-source",
@@ -301,7 +301,7 @@ describe("today command", () => {
       riskBullets: ["Compensation not disclosed"],
     });
 
-    const lines = runTodayCommand({ limit: "10" });
+    const lines = await runTodayCommand({ limit: "10" });
     const combined = lines.join("\n");
     const softSignalIndex = lines.findIndex((line) => line.includes("SoftSignalCo"));
     const deepFitIndex = lines.findIndex((line) => line.includes("DeepFitCo"));
@@ -314,16 +314,16 @@ describe("today command", () => {
     expect(lines[softSignalIndex]).toContain("Aligned preferences:");
   });
 
-  test("excludes company fallback roles by default and can include them explicitly", () => {
+  test("excludes company fallback roles by default and can include them explicitly", async () => {
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
-    const scanId = createScan(db, "manual", new Date().toISOString());
-    const fallbackSourceId = upsertJobSource(db, {
+    const scanId = await createScan(db, "manual", new Date().toISOString());
+    const fallbackSourceId = await upsertJobSource(db, {
       provider: "manual",
       externalId: "fallback-source",
       url: "https://example.com/fallback",
     });
 
-    upsertJob(db, {
+    await upsertJob(db, {
       sourceId: fallbackSourceId,
       scanId,
       externalKey: "company:fallback-co",
@@ -352,8 +352,8 @@ describe("today command", () => {
       status: "shortlisted",
     });
 
-    const defaultLines = runTodayCommand({ limit: "10" });
-    const includeFallbackLines = runTodayCommand({ limit: "10", includeFallback: true });
+    const defaultLines = await runTodayCommand({ limit: "10" });
+    const includeFallbackLines = await runTodayCommand({ limit: "10", includeFallback: true });
 
     expect(defaultLines.join("\n")).not.toContain("FallbackCo");
     expect(includeFallbackLines.join("\n")).toContain("FallbackCo");

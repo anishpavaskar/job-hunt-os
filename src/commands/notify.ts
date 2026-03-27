@@ -4,12 +4,20 @@ import { assembleBriefingData } from "./briefing";
 import { sendBriefingHtmlEmail } from "../integrations/gmail";
 
 export async function runNotifyCommand(): Promise<string> {
-  const db = initDb();
-  const latestScan = db
-    .prepare(`SELECT completed_at FROM scans WHERE completed_at IS NOT NULL ORDER BY completed_at DESC LIMIT 1`)
-    .get() as { completed_at: string } | undefined;
+  const db = await initDb();
+  const { data, error } = await db
+    .from("scans")
+    .select("completed_at")
+    .not("completed_at", "is", null)
+    .order("completed_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) {
+    throw new Error(`Failed to load latest scan: ${error.message}`);
+  }
+  const latestScan = data as { completed_at: string } | null;
   const date = latestScan?.completed_at?.slice(0, 10) ?? new Date().toISOString().slice(0, 10);
-  const briefingData = assembleBriefingData(db, date);
+  const briefingData = await assembleBriefingData(db, date);
 
   try {
     const messageId = await sendBriefingHtmlEmail(briefingData);

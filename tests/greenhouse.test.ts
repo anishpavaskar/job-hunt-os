@@ -18,7 +18,7 @@ const SAMPLE_JOBS = {
     title: "Senior Backend Engineer",
     absolute_url: "https://boards.greenhouse.io/testcorp/jobs/10001",
     location: { name: "San Francisco, CA" },
-    content: "<p>Build <strong>distributed systems</strong> using <em>Kubernetes</em> and Golang.</p>",
+    content: "<p>Date Posted: March 12, 2026. Build <strong>distributed systems</strong> using <em>Kubernetes</em> and Golang.</p>",
     departments: [{ name: "Engineering" }, { name: "Backend" }],
   },
   remoteDesigner: {
@@ -99,6 +99,7 @@ describe("greenhouse ingester", () => {
     expect(job.locations).toBe("San Francisco, CA");
     expect(job.remoteFlag).toBe(false);
     expect(job.seniorityHint).toBe("Senior");
+    expect(job.postedAt).toBe("2026-03-12T00:00:00.000Z");
 
     // HTML should be stripped
     expect(job.summary).not.toContain("<p>");
@@ -177,5 +178,132 @@ describe("greenhouse ingester", () => {
 
     const jobs = await fetchGreenhouseJobs([MOCK_COMPANIES[0]], mockFetch);
     expect(jobs).toHaveLength(0);
+  });
+
+  test("fetches detail when list content is empty", async () => {
+    const fetchCalls: string[] = [];
+    const mockFetch = jest.fn(async (input: string | URL | Request): Promise<Response> => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      fetchCalls.push(url);
+
+      if (url === "https://boards-api.greenhouse.io/v1/boards/testcorp/jobs") {
+        return new Response(JSON.stringify(makeGreenhouseResponse([{
+          ...SAMPLE_JOBS.seniorBackend,
+          content: "",
+        }])), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      if (url === "https://boards-api.greenhouse.io/v1/boards/testcorp/jobs/10001") {
+        return new Response(JSON.stringify(SAMPLE_JOBS.seniorBackend), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      return new Response("Not Found", { status: 404 });
+    });
+
+    const [job] = await fetchGreenhouseJobs([MOCK_COMPANIES[0]], mockFetch);
+
+    expect(fetchCalls).toContain("https://boards-api.greenhouse.io/v1/boards/testcorp/jobs/10001");
+    expect(job.summary).toContain("distributed systems");
+    expect(job.extractedSkills).toEqual(expect.arrayContaining(["kubernetes", "golang"]));
+  });
+
+  test("does not fetch detail when list content is already sufficient", async () => {
+    const fetchCalls: string[] = [];
+    const mockFetch = jest.fn(async (input: string | URL | Request): Promise<Response> => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      fetchCalls.push(url);
+
+      if (url === "https://boards-api.greenhouse.io/v1/boards/testcorp/jobs") {
+        return new Response(JSON.stringify(makeGreenhouseResponse([SAMPLE_JOBS.seniorBackend])), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      return new Response("Not Found", { status: 404 });
+    });
+
+    const jobs = await fetchGreenhouseJobs([MOCK_COMPANIES[0]], mockFetch);
+
+    expect(jobs).toHaveLength(1);
+    expect(fetchCalls).not.toContain("https://boards-api.greenhouse.io/v1/boards/testcorp/jobs/10001");
+  });
+
+  test("keeps list-level content when detail fetch fails", async () => {
+    const fallbackJob = {
+      ...SAMPLE_JOBS.seniorBackend,
+      content: "<p>Python infrastructure role.</p>",
+    };
+
+    const mockFetch = jest.fn(async (input: string | URL | Request): Promise<Response> => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+
+      if (url === "https://boards-api.greenhouse.io/v1/boards/testcorp/jobs") {
+        return new Response(JSON.stringify(makeGreenhouseResponse([{
+          ...fallbackJob,
+          content: "<p>Python infrastructure role.</p>",
+        }])), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      if (url === "https://boards-api.greenhouse.io/v1/boards/testcorp/jobs/10001") {
+        return new Response("Too Many Requests", { status: 429 });
+      }
+
+      return new Response("Not Found", { status: 404 });
+    });
+
+    const [job] = await fetchGreenhouseJobs([MOCK_COMPANIES[0]], mockFetch);
+
+    expect(job.summary).toContain("Python infrastructure role.");
+    expect(job.extractedSkills).toEqual(expect.arrayContaining(["python"]));
+  });
+
+  test("applies delay between multiple detail fetches", async () => {
+    const sleepFn = jest.fn(async () => undefined);
+    const mockFetch = jest.fn(async (input: string | URL | Request): Promise<Response> => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+
+      if (url === "https://boards-api.greenhouse.io/v1/boards/testcorp/jobs") {
+        return new Response(JSON.stringify(makeGreenhouseResponse([
+          { ...SAMPLE_JOBS.seniorBackend, content: "" },
+          { ...SAMPLE_JOBS.internMl, content: "" },
+        ])), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      if (url === "https://boards-api.greenhouse.io/v1/boards/testcorp/jobs/10001") {
+        return new Response(JSON.stringify(SAMPLE_JOBS.seniorBackend), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      if (url === "https://boards-api.greenhouse.io/v1/boards/testcorp/jobs/30003") {
+        return new Response(JSON.stringify(SAMPLE_JOBS.internMl), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      return new Response("Not Found", { status: 404 });
+    });
+
+    const jobs = await fetchGreenhouseJobs([MOCK_COMPANIES[0]], mockFetch, { sleepFn });
+
+    expect(jobs).toHaveLength(2);
+    expect(sleepFn).toHaveBeenCalledWith(200);
+    const delayCalls = sleepFn.mock.calls as unknown as Array<[number]>;
+    expect(delayCalls.filter(([ms]) => ms === 200)).toHaveLength(1);
   });
 });

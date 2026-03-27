@@ -10,20 +10,20 @@ describe("draft persistence", () => {
   let tmpDir: string;
   let previousCwd: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     previousCwd = process.cwd();
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "job-hunt-drafts-"));
     fs.mkdirSync(path.join(tmpDir, "data"), { recursive: true });
     process.chdir(tmpDir);
     resetDb();
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
-    const scanId = createScan(db, "manual", new Date().toISOString());
-    const sourceId = upsertJobSource(db, {
+    const scanId = await createScan(db, "manual", new Date().toISOString());
+    const sourceId = await upsertJobSource(db, {
       provider: "manual",
       externalId: "draft-source",
       url: "https://example.com/jobs/platform",
     });
-    upsertJob(db, {
+    await upsertJob(db, {
       sourceId,
       scanId,
       externalKey: "manual:draft-source",
@@ -59,25 +59,25 @@ describe("draft persistence", () => {
 
   test("draft command can save a generated variant to SQLite", async () => {
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
-    const job = getJobByQuery(db, "Platform Engineer");
-    upsertApplication(db, job!.id, {
+    const job = await getJobByQuery(db, "Platform Engineer");
+    await upsertApplication(db, job!.id, {
       status: "drafted",
       note: "Need to polish draft",
     });
 
     await runDraftCommand("Platform Engineer", { save: true, variant: "v1" });
-    const lines = runListDraftsCommand();
+    const lines = await runListDraftsCommand();
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain("variant=v1");
     expect(lines[0]).toContain("application=drafted");
     const id = parseInt(lines[0].split("|")[0].replace("#", "").trim(), 10);
-    const detail = runShowDraftCommand(id);
+    const detail = await runShowDraftCommand(id);
     expect(detail).toContain("DraftStore");
     expect(detail).toContain("Platform Engineer");
     expect(detail).toContain("application=drafted");
 
-    const application = getApplicationByJobId(db, job!.id);
-    const events = getApplicationEvents(db, application!.id);
+    const application = await getApplicationByJobId(db, job!.id);
+    const events = await getApplicationEvents(db, application!.id);
     expect(events.some((event) => event.event_type === "draft_saved")).toBe(true);
   });
 
@@ -85,8 +85,8 @@ describe("draft persistence", () => {
     const editedPath = path.join(tmpDir, "edited.txt");
     fs.writeFileSync(editedPath, "Edited draft content");
     await runDraftCommand("Platform Engineer", { save: true, variant: "v2", editedFile: editedPath });
-    const lines = runListDraftsCommand("v2");
+    const lines = await runListDraftsCommand("v2");
     const id = parseInt(lines[0].split("|")[0].replace("#", "").trim(), 10);
-    expect(runShowDraftCommand(id)).toContain("Edited draft content");
+    expect(await runShowDraftCommand(id)).toContain("Edited draft content");
   });
 });

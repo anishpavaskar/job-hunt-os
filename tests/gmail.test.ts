@@ -68,7 +68,7 @@ describe("Gmail draft integration", () => {
   let tmpDir: string;
   let previousCwd: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     jest.clearAllMocks();
     process.env = {
       ...previousEnv,
@@ -86,13 +86,13 @@ describe("Gmail draft integration", () => {
     process.chdir(tmpDir);
     resetDb();
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
-    const scanId = createScan(db, "manual", new Date().toISOString());
-    const sourceId = upsertJobSource(db, {
+    const scanId = await createScan(db, "manual", new Date().toISOString());
+    const sourceId = await upsertJobSource(db, {
       provider: "manual",
       externalId: "gmail-source",
       url: "https://example.com/jobs/platform",
     });
-    upsertJob(db, {
+    await upsertJob(db, {
       sourceId,
       scanId,
       externalKey: "manual:gmail-source",
@@ -164,12 +164,12 @@ describe("Gmail draft integration", () => {
     expect(fetchImpl).toHaveBeenCalled();
     expect(draft).toContain("I’d love to contribute");
 
-    const lines = runListDraftsCommand("ai-v1");
+    const lines = await runListDraftsCommand("ai-v1");
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain("gmail=gmail-draft-9");
 
     const id = parseInt(lines[0].split("|")[0].replace("#", "").trim(), 10);
-    const detail = runShowDraftCommand(id);
+    const detail = await runShowDraftCommand(id);
     expect(detail).toContain("gmail=gmail-draft-9");
     expect(detail).toContain("Anthropic");
   });
@@ -192,6 +192,8 @@ describe("Gmail draft integration", () => {
           applyLink: "https://example.com/jobs/1",
           isProspect: true,
           remoteFlag: false,
+          discoveredDate: "2026-03-26",
+          postedDate: "2026-03-12",
           extractedSkills: ["Python", "Kubernetes"],
           stackMatch: 6,
           applicationStatus: null,
@@ -222,6 +224,8 @@ describe("Gmail draft integration", () => {
             applyLink: "https://example.com/jobs/1",
             isProspect: true,
             remoteFlag: false,
+            discoveredDate: "2026-03-26",
+            postedDate: "2026-03-12",
             extractedSkills: ["Python"],
             stackMatch: 2,
             applicationStatus: null,

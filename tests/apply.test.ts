@@ -18,20 +18,20 @@ describe("apply and draft commands", () => {
   let tmpDir: string;
   let previousCwd: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     previousCwd = process.cwd();
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "job-hunt-apply-"));
     fs.mkdirSync(path.join(tmpDir, "data"), { recursive: true });
     process.chdir(tmpDir);
     resetDb();
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
-    const scanId = createScan(db, "yc", new Date().toISOString());
-    const sourceId = upsertJobSource(db, {
+    const scanId = await createScan(db, "yc", new Date().toISOString());
+    const sourceId = await upsertJobSource(db, {
       provider: "yc",
       externalId: "draft-co",
       url: "https://yc.com/draft-co",
     });
-    upsertJob(db, {
+    await upsertJob(db, {
       sourceId,
       scanId,
       externalKey: "role:draft-co:ml-platform",
@@ -66,9 +66,9 @@ describe("apply and draft commands", () => {
     closeDb();
   });
 
-  test("generateDraft builds outreach from DB job", () => {
+  test("generateDraft builds outreach from DB job", async () => {
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
-    const job = getJobByQuery(db, "ML Platform Engineer");
+    const job = await getJobByQuery(db, "ML Platform Engineer");
     expect(job).toBeDefined();
     const draft = generateDraft(job!);
     expect(draft).toContain("Hi DraftCo team");
@@ -85,16 +85,16 @@ describe("apply and draft commands", () => {
       outreachDraftVersion: "draft-v2",
     });
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
-    const followups = listPendingFollowups(db);
+    const followups = await listPendingFollowups(db);
     expect(result.companyName).toContain("DraftCo");
     expect(followups).toHaveLength(1);
-    const job = getJobByQuery(db, "ML Platform Engineer");
-    const application = getApplicationByJobId(db, job!.id);
+    const job = await getJobByQuery(db, "ML Platform Engineer");
+    const application = await getApplicationByJobId(db, job!.id);
     expect(application?.status).toBe("applied");
     expect(application?.applied_url).toContain("/apply");
     expect(application?.resume_version).toBe("resume-v3");
     expect(application?.outreach_draft_version).toBe("draft-v2");
-    expect(getApplicationEvents(db, application!.id)).toHaveLength(2);
+    expect(await getApplicationEvents(db, application!.id)).toHaveLength(2);
   });
 
   test("non-apply statuses do not create a follow-up date", async () => {
@@ -105,6 +105,6 @@ describe("apply and draft commands", () => {
 
     expect(result.dueAt).toBeNull();
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
-    expect(listPendingFollowups(db)).toHaveLength(0);
+    expect(await listPendingFollowups(db)).toHaveLength(0);
   });
 });

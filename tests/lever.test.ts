@@ -14,6 +14,7 @@ const SAMPLE_POSTINGS = {
     text: "Senior Backend Engineer",
     hostedUrl: "https://jobs.lever.co/testcorp/abc-123-def",
     applyUrl: "https://jobs.lever.co/testcorp/abc-123-def/apply",
+    createdAt: "2026-03-08T00:00:00.000Z",
     categories: {
       team: "Engineering",
       department: "Platform",
@@ -114,6 +115,7 @@ describe("lever ingester", () => {
     expect(job.locations).toBe("San Francisco, CA");
     expect(job.remoteFlag).toBe(false);
     expect(job.seniorityHint).toBe("Senior");
+    expect(job.postedAt).toBe("2026-03-08T00:00:00.000Z");
 
     // Summary is plain text (not HTML)
     expect(job.summary).toContain("distributed systems");

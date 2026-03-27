@@ -8,7 +8,7 @@ RUN npm ci --ignore-scripts
 
 COPY src/ ./src/
 COPY config/ ./config/
-RUN npm run build
+RUN npm run cli:build
 
 # ── Production stage ─────────────────────────
 FROM node:20-alpine AS production

@@ -96,28 +96,45 @@ describe("scan command", () => {
             extractedSkills: ["Infrastructure", "Kubernetes"],
           },
         ]),
+        fetchCareersJobs: async () => ([
+          {
+            externalKey: "careers:microsoft:https://apply.careers.microsoft.com/careers/job/1?hl=en",
+            roleExternalId: "https://apply.careers.microsoft.com/careers/job/1?hl=en",
+            roleSource: "careers",
+            title: "Software Engineer II",
+            summary: "Build developer platform tooling at scale",
+            locations: "Mountain View, CA",
+            remoteFlag: false,
+            jobUrl: "https://apply.careers.microsoft.com/careers/job/1?hl=en",
+            seniorityHint: "Senior",
+            extractedSkills: ["TypeScript", "AWS"],
+            postedAt: "2026-03-25T20:50:07.000Z",
+          },
+        ]),
       },
     );
 
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
-    const jobs = listJobs(db, { limit: 10 });
+    const jobs = await listJobs(db, { limit: 10 });
     const scans = db
       .prepare(`SELECT provider, source_counts_json FROM scans ORDER BY id ASC`)
-      .all() as Array<{ provider: string; source_counts_json: string }>;
+      .all() as Array<{ provider: string; source_counts_json: Record<string, unknown> }>;
 
-    expect(result.activeSources).toBe(3);
-    expect(result.upserted).toBe(3);
-    expect(result.newCount).toBe(3);
+    expect(result.activeSources).toBe(4);
+    expect(result.upserted).toBe(4);
+    expect(result.newCount).toBe(4);
     expect(result.updatedCount).toBe(0);
-    expect(result.roleCount).toBe(3);
-    expect(jobs).toHaveLength(3);
+    expect(result.roleCount).toBe(4);
+    expect(jobs).toHaveLength(4);
     expect(jobs.some((job) => job.company_name === "InfraCo")).toBe(true);
     expect(jobs.some((job) => job.company_name === "Anthropic")).toBe(true);
     expect(jobs.some((job) => job.company_name === "Cloudflare")).toBe(true);
-    expect(scans.map((scan) => scan.provider)).toEqual(["yc", "greenhouse", "lever"]);
-    expect(JSON.parse(scans[0].source_counts_json)).toMatchObject({ totalRoles: 1, upserted: 1, newCount: 1 });
-    expect(JSON.parse(scans[1].source_counts_json)).toMatchObject({ totalRoles: 1, upserted: 1, newCount: 1 });
-    expect(JSON.parse(scans[2].source_counts_json)).toMatchObject({ totalRoles: 1, upserted: 1, newCount: 1 });
+    expect(jobs.some((job) => job.company_name === "Microsoft")).toBe(true);
+    expect(scans.map((scan) => scan.provider)).toEqual(["yc", "greenhouse", "lever", "careers"]);
+    expect(scans[0].source_counts_json).toMatchObject({ totalRoles: 1, upserted: 1, newCount: 1 });
+    expect(scans[1].source_counts_json).toMatchObject({ totalRoles: 1, upserted: 1, newCount: 1 });
+    expect(scans[2].source_counts_json).toMatchObject({ totalRoles: 1, upserted: 1, newCount: 1 });
+    expect(scans[3].source_counts_json).toMatchObject({ totalRoles: 1, upserted: 1, newCount: 1 });
   });
 
   test("continues scanning when one source fails", async () => {
@@ -167,18 +184,19 @@ describe("scan command", () => {
             extractedSkills: ["Infrastructure", "Kubernetes"],
           },
         ]),
+        fetchCareersJobs: async () => [],
       },
     );
 
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
-    const jobs = listJobs(db, { limit: 10 });
+    const jobs = await listJobs(db, { limit: 10 });
     const greenhouseScan = db
       .prepare(`SELECT source_counts_json FROM scans WHERE provider = 'greenhouse' ORDER BY id DESC LIMIT 1`)
-      .get() as { source_counts_json: string };
+      .get() as { source_counts_json: Record<string, unknown> };
 
     expect(result.upserted).toBe(2);
     expect(jobs).toHaveLength(2);
-    expect(JSON.parse(greenhouseScan.source_counts_json)).toMatchObject({ failed: true, upserted: 0 });
+    expect(greenhouseScan.source_counts_json).toMatchObject({ failed: true, upserted: 0 });
   });
 
   test("counts upserted separately from new when rescanning existing roles", async () => {
@@ -222,6 +240,7 @@ describe("scan command", () => {
       }),
       fetchGreenhouseJobs: async () => [],
       fetchLeverJobs: async () => [],
+      fetchCareersJobs: async () => [],
     };
 
     const first = await runScanCommand({}, deps);
@@ -229,7 +248,7 @@ describe("scan command", () => {
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
     const latestScan = db
       .prepare(`SELECT source_counts_json FROM scans WHERE provider = 'yc' ORDER BY id DESC LIMIT 1`)
-      .get() as { source_counts_json: string };
+      .get() as { source_counts_json: Record<string, unknown> };
 
     expect(first.upserted).toBe(1);
     expect(first.newCount).toBe(1);
@@ -237,6 +256,6 @@ describe("scan command", () => {
     expect(second.upserted).toBe(1);
     expect(second.newCount).toBe(0);
     expect(second.updatedCount).toBe(1);
-    expect(JSON.parse(latestScan.source_counts_json)).toMatchObject({ upserted: 1, newCount: 0 });
+    expect(latestScan.source_counts_json).toMatchObject({ upserted: 1, newCount: 0 });
   });
 });

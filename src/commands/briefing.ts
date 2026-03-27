@@ -1,7 +1,8 @@
-import Database from "better-sqlite3";
 import { Command } from "commander";
 import { initDb } from "../db";
 import {
+  getApplicationEvents,
+  listBrowseJobs,
   listPendingFollowups,
   listDrafts,
   getConversionStats,
@@ -17,11 +18,15 @@ import type {
   BriefingFunnel,
   BriefingApplyNowRole,
 } from "../briefing/types";
-import { countVisibleNewRoles } from "../briefing/types";
+import { countActualNewRoles } from "../briefing/types";
 import { sendBriefingHtmlEmail } from "../integrations/gmail";
 import { loadProfile } from "../config/profile";
 import type { Profile } from "../config/types";
-import type { JobRecord } from "../db/types";
+import type { ApplicationStatus, JobRecord } from "../db/types";
+
+type DbStatusRow = { status: string; applied_at?: string | null };
+type DbApplicationRefRow = { id: number | string; applied_at: string | null };
+type DbApplicationJobRow = { job_id: number | string; status: string };
 
 // ─── Data assembly (exported for testing) ──────────────────────
 
@@ -36,16 +41,8 @@ function formatDate(iso: string): string {
   return iso.slice(0, 10);
 }
 
-function getDateWindow(dateStr?: string): { startIso: string; endIso: string } {
-  if (!dateStr) {
-    const end = new Date();
-    const start = new Date(end.getTime() - DEFAULT_BRIEFING_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
-    return {
-      startIso: start.toISOString(),
-      endIso: end.toISOString(),
-    };
-  }
-
+function getDateWindow(dateStr?: string): { startIso: string; endIso: string } | null {
+  if (!dateStr) return null;
   const date = dateStr;
   return {
     startIso: `${date}T00:00:00.000Z`,
@@ -71,14 +68,6 @@ function computeStackMatch(extractedSkills: string[], profile: Profile | null): 
   return Math.min(tier1Count * 2 + tier2Count, 10);
 }
 
-function parseJsonArray(raw: string): string[] {
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return [];
-  }
-}
-
 function formatLocationForBriefing(locations: string): string {
   return locations
     .split(/[|;]/)
@@ -87,31 +76,52 @@ function formatLocationForBriefing(locations: string): string {
     .join(" • ");
 }
 
-export function assembleNewRoles(
-  db: Database.Database,
+function safeFormatDate(value: string | null | undefined): string | null {
+  if (!value) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString().slice(0, 10);
+}
+
+export async function assembleNewRoles(
+  db: Awaited<ReturnType<typeof initDb>>,
   prospectNames: Set<string>,
   dateStr?: string,
   opts: { includeFallback?: boolean; minScore?: number; profile?: Profile | null } = {},
-): BriefingNewRole[] {
-  const { startIso, endIso } = getDateWindow(dateStr);
+): Promise<BriefingNewRole[]> {
+  const dateWindow = getDateWindow(dateStr);
   const includeFallback = opts.includeFallback ?? false;
   const minScore = opts.minScore ?? DEFAULT_BRIEFING_MIN_SCORE;
   const profile = opts.profile ?? null;
-  const fallbackClause = includeFallback ? "" : `AND jobs.role_source != 'company_fallback'`;
-  const rows = db
-    .prepare(
-      `SELECT jobs.*, job_sources.external_id, job_sources.url AS source_url, applications.status AS application_status
-       FROM jobs
-       JOIN job_sources ON job_sources.id = jobs.source_id
-       LEFT JOIN applications ON applications.job_id = jobs.id
-       WHERE jobs.score >= ?
-         AND datetime(jobs.created_at) >= datetime(?)
-         AND datetime(jobs.created_at) <= datetime(?)
-         ${fallbackClause}
-       ORDER BY jobs.score DESC, jobs.company_name ASC
-       LIMIT 50`,
-    )
-    .all(minScore, startIso, endIso) as JobRecord[];
+  let rows = await listBrowseJobs(db, {
+    minScore,
+    realRolesOnly: !includeFallback,
+    sort: "score",
+    limit: 5000,
+  });
+  const { data: applicationsData, error: applicationsError } = await db.from("applications").select("job_id,status");
+  if (applicationsError) {
+    throw new Error(`assemble new roles applications: ${applicationsError.message}`);
+  }
+  const applicationStatusByJobId = new Map<number, ApplicationStatus>(
+    ((applicationsData ?? []) as DbApplicationJobRow[]).map((row: DbApplicationJobRow) => [
+      Number(row.job_id),
+      row.status as ApplicationStatus,
+    ]),
+  );
+
+  rows = rows
+    .filter((job) => includeFallback || job.role_source !== "company_fallback")
+    .filter((job) => {
+      if (dateWindow) {
+        const created = new Date(job.created_at).toISOString();
+        return created >= dateWindow.startIso && created <= dateWindow.endIso;
+      }
+      return ["new", "reviewed", "saved", "shortlisted", "drafted"].includes(job.status);
+    })
+    .sort((a, b) => b.score - a.score || a.company_name.localeCompare(b.company_name))
+    .slice(0, 50);
 
   const MAX_ROLES_PER_COMPANY = 2;
   const output: BriefingNewRole[] = [];
@@ -145,7 +155,9 @@ export function assembleNewRoles(
           topRisk: null,
           applyLink: null,
           isProspect,
-          remoteFlag: row.remote_flag === 1,
+          remoteFlag: row.remote_flag,
+          discoveredDate: safeFormatDate(row.created_at) ?? "",
+          postedDate: safeFormatDate(row.posted_at),
           extractedSkills: [],
           stackMatch: 0,
           applicationStatus: null,
@@ -154,11 +166,11 @@ export function assembleNewRoles(
       continue;
     }
 
-    const explanations = parseJsonArray(row.explanation_bullets_json);
-    const risks = parseJsonArray(row.risk_bullets_json);
-    const extractedSkills = parseJsonArray(row.extracted_skills_json);
+    const explanations = row.explanation_bullets_json;
+    const risks = row.risk_bullets_json;
+    const extractedSkills = row.extracted_skills_json;
     const stackMatch = computeStackMatch(extractedSkills, profile);
-    const applicationStatus = (row as JobRecord & { application_status?: string | null }).application_status ?? null;
+    const applicationStatus = applicationStatusByJobId.get(row.id) ?? null;
 
     output.push({
       kind: "role",
@@ -171,7 +183,9 @@ export function assembleNewRoles(
       topRisk: risks[0] ?? null,
       applyLink: row.job_url,
       isProspect,
-      remoteFlag: row.remote_flag === 1,
+      remoteFlag: row.remote_flag,
+      discoveredDate: safeFormatDate(row.created_at) ?? "",
+      postedDate: safeFormatDate(row.posted_at),
       extractedSkills,
       stackMatch,
       applicationStatus,
@@ -182,30 +196,34 @@ export function assembleNewRoles(
   return output;
 }
 
-export function assembleFollowups(db: Database.Database): BriefingFollowup[] {
-  const followups = listPendingFollowups(db);
+export async function assembleFollowups(db: Awaited<ReturnType<typeof initDb>>): Promise<BriefingFollowup[]> {
+  const followups = await listPendingFollowups(db);
+  const { data: applicationsData, error: applicationsError } = await db
+    .from("applications")
+    .select("id, applied_at");
+  if (applicationsError) {
+    throw new Error(`assemble followups applications: ${applicationsError.message}`);
+  }
+  const appliedAtById = new Map<number, string | null>(
+    ((applicationsData ?? []) as DbApplicationRefRow[]).map((row: DbApplicationRefRow) => [
+      Number(row.id),
+      row.applied_at,
+    ]),
+  );
 
-  return followups.map((f) => {
+  return Promise.all(followups.map(async (f) => {
     let lastAction = "Follow-up scheduled";
     let appliedDate: string | null = null;
 
     if (f.application_id) {
-      const event = db
-        .prepare(
-          `SELECT event_type, created_at FROM application_events
-           WHERE application_id = ?
-           ORDER BY created_at DESC LIMIT 1`,
-        )
-        .get(f.application_id) as { event_type: string; created_at: string } | undefined;
+      const event = (await getApplicationEvents(db, f.application_id)).slice(-1)[0];
       if (event) {
         lastAction = `${event.event_type.replace(/_/g, " ")} (${formatDate(event.created_at)})`;
       }
 
-      const application = db
-        .prepare(`SELECT applied_at FROM applications WHERE id = ?`)
-        .get(f.application_id) as { applied_at: string | null } | undefined;
-      if (application?.applied_at) {
-        appliedDate = formatDate(application.applied_at);
+      const appliedAt = appliedAtById.get(f.application_id) ?? null;
+      if (appliedAt) {
+        appliedDate = formatDate(appliedAt);
       }
     }
 
@@ -217,14 +235,14 @@ export function assembleFollowups(db: Database.Database): BriefingFollowup[] {
       notes: f.note,
       appliedDate,
     };
-  });
+  }));
 }
 
-export function assembleApplyNow(
-  db: Database.Database,
-): BriefingApplyNowRole[] {
+export async function assembleApplyNow(
+  db: Awaited<ReturnType<typeof initDb>>,
+): Promise<BriefingApplyNowRole[]> {
   const seenCompanies = new Set<string>();
-  const primary = listNextActions(db, 50)
+  const primary = (await listNextActions(db, 50))
     .filter((action) => action.actionType === "apply")
     .filter((action) => {
       const key = action.companyName.toLowerCase();
@@ -254,17 +272,14 @@ export function assembleApplyNow(
   }
 
   const fallbackSeen = new Set<string>();
-  const fallbackCandidates = listJobs(db, {
+  const fallbackCandidates = (await listJobs(db, {
     minScore: 50,
     todayOnly: true,
     limit: 50,
-  })
+  }))
     .filter((job) => job.role_source !== "company_fallback")
     .filter((job) => {
-      const breakdown = JSON.parse(job.score_breakdown_json) as {
-        roleFit: number;
-        stackFit: number;
-      };
+      const breakdown = job.score_breakdown_json;
       const combined = breakdown.roleFit + breakdown.stackFit;
       const bestDimension = Math.max(breakdown.roleFit, breakdown.stackFit);
       return combined >= 18 && bestDimension >= 10;
@@ -278,8 +293,8 @@ export function assembleApplyNow(
     .slice(0, 5);
 
   return fallbackCandidates.map((job, index) => {
-    const explanations: string[] = JSON.parse(job.explanation_bullets_json);
-    const risks: string[] = JSON.parse(job.risk_bullets_json);
+    const explanations = job.explanation_bullets_json;
+    const risks = job.risk_bullets_json;
     return {
       rank: index + 1,
       score: job.score,
@@ -293,8 +308,8 @@ export function assembleApplyNow(
   });
 }
 
-export function assembleDrafts(db: Database.Database): BriefingDraft[] {
-  const allDrafts = listDrafts(db);
+export async function assembleDrafts(db: Awaited<ReturnType<typeof initDb>>): Promise<BriefingDraft[]> {
+  const allDrafts = await listDrafts(db);
 
   return allDrafts
     .filter((d) => d.application_status === "drafted" || d.application_status === null)
@@ -306,25 +321,31 @@ export function assembleDrafts(db: Database.Database): BriefingDraft[] {
     }));
 }
 
-export function assembleWeeklyFunnel(db: Database.Database): BriefingFunnel {
-  const totalRow = db
-    .prepare(`SELECT COUNT(*) AS count FROM jobs`)
-    .get() as { count: number };
+export async function assembleWeeklyFunnel(db: Awaited<ReturnType<typeof initDb>>): Promise<BriefingFunnel> {
+  const { count: totalTracked, error: jobsError } = await db
+    .from("jobs")
+    .select("id", { count: "exact", head: true });
+  if (jobsError) {
+    throw new Error(`assemble weekly funnel jobs: ${jobsError.message}`);
+  }
 
   const weekCutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  const { data: applicationsData, error: applicationsError } = await db
+    .from("applications")
+    .select("applied_at,status");
+  if (applicationsError) {
+    throw new Error(`assemble weekly funnel applications: ${applicationsError.message}`);
+  }
+  const weekApplied = ((applicationsData ?? []) as DbStatusRow[]).filter((row: DbStatusRow) =>
+    row.applied_at && row.applied_at >= weekCutoff
+    && ["applied", "followup_due", "replied", "interview", "rejected", "archived"].includes(row.status as string),
+  ).length;
 
-  const weekApplied = db
-    .prepare(
-      `SELECT COUNT(*) AS count FROM applications
-       WHERE applied_at >= ? AND status IN ('applied', 'followup_due', 'replied', 'interview', 'rejected', 'archived')`,
-    )
-    .get(weekCutoff) as { count: number };
-
-  const conversion = getConversionStats(db);
+  const conversion = await getConversionStats(db);
 
   return {
-    totalTracked: totalRow.count,
-    appliedThisWeek: weekApplied.count,
+    totalTracked: totalTracked ?? 0,
+    appliedThisWeek: weekApplied,
     responsesReceived: conversion.replied,
     interviewsScheduled: conversion.interview,
     applyToResponseRate: percent(conversion.replied, conversion.applied),
@@ -332,23 +353,36 @@ export function assembleWeeklyFunnel(db: Database.Database): BriefingFunnel {
   };
 }
 
-function countLatestScannedSources(db: Database.Database): number {
-  const latest = db
-    .prepare(`SELECT started_at FROM scans WHERE completed_at IS NOT NULL ORDER BY completed_at DESC LIMIT 1`)
-    .get() as { started_at: string } | undefined;
+async function countLatestScannedSources(db: Awaited<ReturnType<typeof initDb>>): Promise<number> {
+  const { data: latest, error: latestError } = await db
+    .from("scans")
+    .select("started_at")
+    .not("completed_at", "is", null)
+    .order("completed_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (latestError) {
+    throw new Error(`count latest scanned sources: ${latestError.message}`);
+  }
   if (!latest?.started_at) return 0;
-  const row = db
-    .prepare(`SELECT COUNT(*) AS count FROM scans WHERE started_at = ? AND completed_at IS NOT NULL`)
-    .get(latest.started_at) as { count: number };
-  return row.count;
+  const { count, error } = await db
+    .from("scans")
+    .select("id", { count: "exact", head: true })
+    .eq("started_at", latest.started_at)
+    .not("completed_at", "is", null);
+  if (error) {
+    throw new Error(`count latest scanned sources: ${error.message}`);
+  }
+  return count ?? 0;
 }
 
-export function assembleBriefingData(
-  db: Database.Database,
+export async function assembleBriefingData(
+  db: Awaited<ReturnType<typeof initDb>>,
   dateOverride?: string,
   opts: { includeFallback?: boolean; minScore?: number } = {},
-): BriefingData {
+): Promise<BriefingData> {
   const date = dateOverride ?? todayISO();
+  const roleWindowDate = dateOverride;
   const prospectCompanies = loadProspectCompanies();
   const prospectNames = new Set(prospectCompanies.map((c) => c.name.toLowerCase()));
 
@@ -359,68 +393,110 @@ export function assembleBriefingData(
     console.warn("[briefing] Failed to load profile.json; stackMatch metrics will default to 0");
   }
 
-  const totalTracked = (
-    db.prepare(`SELECT COUNT(*) AS count FROM jobs`).get() as { count: number }
-  ).count;
+  const { count: totalTrackedCount, error: totalTrackedError } = await db
+    .from("jobs")
+    .select("id", { count: "exact", head: true });
+  if (totalTrackedError) {
+    throw new Error(`assemble briefing total tracked: ${totalTrackedError.message}`);
+  }
 
-  const appliedCount = (
-    db
-      .prepare(
-        `SELECT COUNT(*) AS count FROM applications
-         WHERE status IN ('applied', 'followup_due', 'replied', 'interview', 'rejected', 'archived', 'offer')`,
-      )
-      .get() as { count: number }
-  ).count;
+  const { data: applicationsData, error: applicationsError } = await db
+    .from("applications")
+    .select("status");
+  if (applicationsError) {
+    throw new Error(`assemble briefing applications: ${applicationsError.message}`);
+  }
+  const applicationStatuses = ((applicationsData ?? []) as DbStatusRow[]).map((row: DbStatusRow) => row.status);
+  const appliedCount = applicationStatuses.filter((status: string) =>
+    ["applied", "followup_due", "replied", "interview", "rejected", "archived", "offer"].includes(status),
+  ).length;
 
-  const workflowCounts = db
-    .prepare(
-      `SELECT
-         SUM(CASE WHEN status IN ('saved', 'shortlisted') THEN 1 ELSE 0 END) AS saved,
-         SUM(CASE WHEN status = 'drafted' THEN 1 ELSE 0 END) AS drafted,
-         SUM(CASE WHEN status IN ('applied', 'followup_due', 'replied', 'rejected', 'archived') THEN 1 ELSE 0 END) AS applied,
-         SUM(CASE WHEN status = 'interview' THEN 1 ELSE 0 END) AS interview
-       FROM applications`,
-    )
-    .get() as {
-      saved: number | null;
-      drafted: number | null;
-      applied: number | null;
-      interview: number | null;
-    };
+  const workflowCounts = {
+    saved: applicationStatuses.filter((status: string) => ["saved", "shortlisted"].includes(status)).length,
+    drafted: applicationStatuses.filter((status: string) => status === "drafted").length,
+    applied: applicationStatuses.filter((status: string) => ["applied", "followup_due", "replied", "rejected", "archived"].includes(status)).length,
+    interview: applicationStatuses.filter((status: string) => status === "interview").length,
+  };
 
-  const sourcesScanned = countLatestScannedSources(db);
+  const sourcesScanned = await countLatestScannedSources(db);
 
-  const applyNow = assembleApplyNow(db);
+  const applyNow = await assembleApplyNow(db);
 
   return {
     date,
     applyNow,
-    newRoles: assembleNewRoles(db, prospectNames, date, { ...opts, profile }),
-    followups: assembleFollowups(db),
-    drafts: assembleDrafts(db),
-    funnel: isMonday(date) ? assembleWeeklyFunnel(db) : null,
+    newRoles: await assembleNewRoles(db, prospectNames, roleWindowDate, { ...opts, profile }),
+    followups: await assembleFollowups(db),
+    drafts: await assembleDrafts(db),
+    funnel: isMonday(date) ? await assembleWeeklyFunnel(db) : null,
     appliedCount,
-    workflowCounts: {
-      saved: workflowCounts.saved ?? 0,
-      drafted: workflowCounts.drafted ?? 0,
-      applied: workflowCounts.applied ?? 0,
-      interview: workflowCounts.interview ?? 0,
-    },
-    totalTracked,
+    workflowCounts,
+    totalTracked: totalTrackedCount ?? 0,
     sourcesScanned,
   };
 }
 
-export function getBriefingSmsSummary(data: BriefingData): { newRoleCount: number; topScore: number } {
-  const visibleRolesCount = countVisibleNewRoles(data.newRoles);
-  const topRole = data.newRoles.find((role) => role.kind !== "overflow");
-  return {
-    newRoleCount: visibleRolesCount,
-    topScore: topRole?.score ?? 0,
-  };
+// ─── CLI command ───────────────────────────────────────────────
+
+export interface BriefingCommandOptions {
+  scan?: boolean;
+  date?: string;
+  includeFallback?: boolean;
 }
 
-// ─── CLI command ───────────────────────────────────────────────
+export async function runBriefingCommand(opts: BriefingCommandOptions = {}): Promise<void> {
+  if (opts.scan !== false) {
+    console.log("[briefing] Scanning all sources...");
+    try {
+      const { runScanCommand } = await import("./scan");
+      const scanResult = await runScanCommand();
+      console.log(
+        `[briefing] Scan done. Upserted ${scanResult.upserted} roles (${scanResult.newCount} new).`,
+      );
+    } catch (err) {
+      console.warn(
+        `[briefing] Scan failed, continuing with existing data: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  }
+
+  const db = await initDb();
+  const data = await assembleBriefingData(db, opts.date, { includeFallback: opts.includeFallback });
+  const newRoleCount = countActualNewRoles(data.newRoles);
+
+  console.log(`[briefing] Assembling briefing for ${data.date}`);
+  console.log(
+    `  Newly discovered (${DEFAULT_BRIEFING_MIN_SCORE}+, ${opts.includeFallback ? "including fallback" : "real roles only"}): ${newRoleCount}`,
+  );
+  console.log(`  Best apply-now: ${data.applyNow.length}`);
+  console.log(`  Pending follow-ups: ${data.followups.length}`);
+  console.log(`  Unsent drafts: ${data.drafts.length}`);
+  if (data.funnel) {
+    console.log(
+      `  Weekly funnel: ${data.funnel.totalTracked} tracked, ${data.funnel.appliedThisWeek} applied this week`,
+    );
+  }
+
+  try {
+    const messageId = await sendBriefingHtmlEmail(data);
+    console.log(`\n[briefing] Email sent (message ID: ${messageId})`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("Missing Google credentials")) {
+      console.error(`[briefing] ${msg}`);
+      console.error(
+        "[briefing] Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN in .env",
+      );
+    } else if (msg.includes("MY_EMAIL")) {
+      console.error(`[briefing] ${msg}`);
+      console.error(
+        "[briefing] Set MY_EMAIL (or NOTIFY_EMAIL_TO) in .env to specify the recipient.",
+      );
+    } else {
+      throw err;
+    }
+  }
+}
 
 export function registerBriefingCommand(): Command {
   return new Command("briefing")
@@ -428,57 +504,7 @@ export function registerBriefingCommand(): Command {
     .option("--no-scan", "Skip scanning sources before generating briefing")
     .option("--date <date>", "Override the briefing date (YYYY-MM-DD)")
     .option("--include-fallback", "include company-level fallback records in briefing new roles")
-    .action(async (opts: { scan?: boolean; date?: string; includeFallback?: boolean }) => {
-      if (opts.scan !== false) {
-        console.log("[briefing] Scanning all sources...");
-        try {
-          const { runScanCommand } = await import("./scan");
-          const scanResult = await runScanCommand();
-          console.log(
-            `[briefing] Scan done. Upserted ${scanResult.upserted} roles (${scanResult.newCount} new).`,
-          );
-        } catch (err) {
-          console.warn(
-            `[briefing] Scan failed, continuing with existing data: ${err instanceof Error ? err.message : err}`,
-          );
-        }
-      }
-
-      const db = initDb();
-      const data = assembleBriefingData(db, opts.date, { includeFallback: opts.includeFallback });
-
-      console.log(`[briefing] Assembling briefing for ${data.date}`);
-      const summary = getBriefingSmsSummary(data);
-      console.log(
-        `  Newly discovered (${DEFAULT_BRIEFING_MIN_SCORE}+, ${opts.includeFallback ? "including fallback" : "real roles only"}): ${summary.newRoleCount}`,
-      );
-      console.log(`  Best apply-now: ${data.applyNow.length}`);
-      console.log(`  Pending follow-ups: ${data.followups.length}`);
-      console.log(`  Unsent drafts: ${data.drafts.length}`);
-      if (data.funnel) {
-        console.log(
-          `  Weekly funnel: ${data.funnel.totalTracked} tracked, ${data.funnel.appliedThisWeek} applied this week`,
-        );
-      }
-
-      try {
-        const messageId = await sendBriefingHtmlEmail(data);
-        console.log(`\n[briefing] Email sent (message ID: ${messageId})`);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        if (msg.includes("Missing Google credentials")) {
-          console.error(`[briefing] ${msg}`);
-          console.error(
-            "[briefing] Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN in .env",
-          );
-        } else if (msg.includes("MY_EMAIL")) {
-          console.error(`[briefing] ${msg}`);
-          console.error(
-            "[briefing] Set MY_EMAIL (or NOTIFY_EMAIL_TO) in .env to specify the recipient.",
-          );
-        } else {
-          throw err;
-        }
-      }
+    .action(async (opts: BriefingCommandOptions) => {
+      await runBriefingCommand(opts);
     });
 }

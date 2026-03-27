@@ -1,5 +1,5 @@
 import type { CareerPage } from "../../config/career-pages";
-import type { NormalizedOpportunity } from "./normalize";
+import { extractPostedAt, type NormalizedOpportunity } from "./normalize";
 import { RESUME_KEYWORDS, TIER1_TAGS, TIER2_TAGS } from "../../config/scoring";
 
 // ─── Types ─────────────────────────────────────────────────────
@@ -9,6 +9,7 @@ export interface RawExtractedRole {
   url: string;
   location?: string;
   description?: string;
+  postedAt?: string | null;
   source: "jsonld" | "link_pattern" | "iframe_redirect";
 }
 
@@ -58,6 +59,17 @@ function stripHtml(html: string): string {
     .replace(/&#39;/g, "'")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function cleanTitle(title: string): string {
+  return title
+    .replace(/\s*[|\-]\s*(?:Microsoft Careers|Careers at .+|Jobs at .+)$/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isGenericRoleTitle(title: string): boolean {
+  return /^(see details|details|learn more|apply now|apply)$/i.test(title.trim());
 }
 
 function sleep(ms: number): Promise<void> {
@@ -135,8 +147,9 @@ function parseJobPosting(posting: Record<string, unknown>, baseUrl: string): Raw
   const description = typeof posting.description === "string"
     ? stripHtml(posting.description).slice(0, 500)
     : undefined;
+  const postedAt = extractPostedAt(posting, description);
 
-  return { title, url, location, description, source: "jsonld" };
+  return { title, url, location, description, postedAt, source: "jsonld" };
 }
 
 function extractJobPostingLocation(posting: Record<string, unknown>): string | undefined {
@@ -232,6 +245,83 @@ function extractLinkPatterns(html: string, baseUrl: string): RawExtractedRole[] 
   return roles;
 }
 
+function extractTitleFromHtml(html: string): string | null {
+  const match = html.match(/<title>([\s\S]*?)<\/title>/i);
+  if (!match) return null;
+  const title = cleanTitle(stripHtml(match[1]));
+  return title || null;
+}
+
+function extractPostedAtFromHtml(html: string): string | null {
+  const rawPatterns = [
+    /"datePosted"\s*:\s*"([^"]+)"/i,
+    /"posted_at"\s*:\s*"([^"]+)"/i,
+    /"published_at"\s*:\s*"([^"]+)"/i,
+    /"created_at"\s*:\s*"([^"]+)"/i,
+  ];
+
+  for (const pattern of rawPatterns) {
+    const match = html.match(pattern);
+    if (!match) continue;
+    const parsed = extractPostedAt({ datePosted: match[1] });
+    if (parsed) return parsed;
+  }
+
+  return extractPostedAt(undefined, stripHtml(html));
+}
+
+async function hydrateLinkRole(
+  role: RawExtractedRole,
+  fetchFn: typeof globalThis.fetch,
+): Promise<RawExtractedRole> {
+  let response: Response;
+  try {
+    response = await fetchFn(role.url);
+  } catch {
+    return role;
+  }
+
+  if (!response.ok) return role;
+
+  let html: string;
+  try {
+    html = await response.text();
+  } catch {
+    return role;
+  }
+
+  const jsonLdRoles = extractJsonLd(html, role.url);
+  const bestJsonLdRole = jsonLdRoles.find((candidate) => !isGenericRoleTitle(candidate.title));
+  if (bestJsonLdRole) {
+    return {
+      ...role,
+      title: cleanTitle(bestJsonLdRole.title || role.title),
+      location: bestJsonLdRole.location ?? role.location,
+      description: bestJsonLdRole.description ?? role.description,
+      postedAt: bestJsonLdRole.postedAt ?? role.postedAt ?? extractPostedAtFromHtml(html),
+    };
+  }
+
+  return {
+    ...role,
+    title: isGenericRoleTitle(role.title) ? cleanTitle(extractTitleFromHtml(html) ?? role.title) : role.title,
+    postedAt: role.postedAt ?? extractPostedAtFromHtml(html),
+  };
+}
+
+async function hydrateLinkRoles(
+  roles: RawExtractedRole[],
+  fetchFn: typeof globalThis.fetch,
+): Promise<RawExtractedRole[]> {
+  const hydrated: RawExtractedRole[] = [];
+
+  for (const role of roles) {
+    hydrated.push(await hydrateLinkRole(role, fetchFn));
+  }
+
+  return hydrated;
+}
+
 // ─── Normalizer ────────────────────────────────────────────────
 
 function normalizeCareerRole(
@@ -249,6 +339,7 @@ function normalizeCareerRole(
     locations: locationText,
     remoteFlag: inferRemote(locationText) || inferRemote(role.title),
     jobUrl: role.url,
+    postedAt: role.postedAt ?? null,
     seniorityHint: inferSeniority(role.title),
     extractedSkills: extractSkills(role.title, role.description),
   };
@@ -318,9 +409,10 @@ export async function scrapeCareerPage(
   const linkRoles = extractLinkPatterns(html, company.careersUrl);
   if (linkRoles.length > 0) {
     const deduped = deduplicateRoles(linkRoles);
+    const hydrated = await hydrateLinkRoles(deduped, fetchFn);
     return {
       company,
-      roles: deduped.map((r) => normalizeCareerRole(company, r)),
+      roles: hydrated.map((r) => normalizeCareerRole(company, r)),
       rawCount: deduped.length,
       strategy: "link_pattern",
     };

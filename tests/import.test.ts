@@ -53,7 +53,7 @@ describe("manual import", () => {
 
     const result = await runImportCommand(filePath, "json");
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
-    const jobs = listJobs(db, { limit: 10 });
+    const jobs = await listJobs(db, { limit: 10 });
     expect(result.imported).toBe(1);
     expect(jobs).toHaveLength(1);
     expect(jobs[0].title).toBe("Backend Engineer");
@@ -76,7 +76,7 @@ describe("manual import", () => {
     expect(result.rawCount).toBe(2);
     expect(result.validCount).toBe(1);
 
-    const lines = runReviewCommand({ today: true, limit: "10" });
+    const lines = await runReviewCommand({ today: true, limit: "10" });
     expect(lines[0]).toContain("CsvCo");
     expect(lines[0]).toContain("Platform Engineer");
     expect(lines[0]).toContain("next action:");

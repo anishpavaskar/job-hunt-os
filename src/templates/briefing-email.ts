@@ -1,4 +1,4 @@
-import { countVisibleNewRoles } from "../briefing/types";
+import { countActualNewRoles } from "../briefing/types";
 import type { BriefingData, BriefingNewRole, BriefingFollowup } from "../briefing/types";
 
 // ─── Color tokens (all hardcoded hex — no CSS vars) ────────────
@@ -116,6 +116,10 @@ function renderRoleCard(role: BriefingNewRole): string {
   const locationLine = [h(role.location), topSkills ? h(topSkills) : ""]
     .filter(Boolean)
     .join(" &middot; ");
+  const dateBits = [
+    role.postedDate ? `Posted ${h(role.postedDate)}` : "",
+    role.discoveredDate ? `Tracked ${h(role.discoveredDate)}` : "",
+  ].filter(Boolean).join(" &middot; ");
 
   const pills: string[] = [
     pill(`Stack match: ${role.stackMatch}/10`, C.blueBg, C.blueText),
@@ -143,6 +147,7 @@ function renderRoleCard(role: BriefingNewRole): string {
       </table>
       <p style="margin:4px 0 0;font-size:14px;color:${C.textPrimary};font-family:${FONT};">${h(role.role)}</p>
       <p style="margin:4px 0 0;font-size:13px;color:${C.textSecondary};font-family:${FONT};">${locationLine}</p>
+      ${dateBits ? `<p style="margin:4px 0 0;font-size:12px;color:${C.textTertiary};font-family:${FONT};">${dateBits}</p>` : ""}
       <p style="margin:8px 0 0;">${pills.join("")}</p>
       ${riskLine}
     </td></tr>
@@ -227,7 +232,7 @@ export function renderBriefingEmail(data: BriefingData): string {
     totalTracked = 0,
     sourcesScanned = 0,
   } = data;
-  const visibleRolesCount = countVisibleNewRoles(newRoles);
+  const actualRolesCount = countActualNewRoles(newRoles);
   const above70 = newRoles.filter((r) => (r.score ?? 0) >= 70 && r.kind !== "overflow").length;
   const topVisibleRole = newRoles.find((role) => role.kind !== "overflow");
   const topScore = topVisibleRole?.score ?? 0;
@@ -243,11 +248,11 @@ export function renderBriefingEmail(data: BriefingData): string {
 
   const trackedRecentlySection =
     newRoles.length > 0
-      ? `${sectionHeader("Tracked Recently")}
+      ? `${sectionHeader("Best Open Tracked Roles")}
 ${roleCards}
 ${overflowRow}`
-      : `${sectionHeader("Tracked Recently")}
-<tr><td style="padding:0 0 16px;font-size:14px;color:${C.textSecondary};font-family:${FONT};">No tracked roles scored above 50 in the last 14 days.</td></tr>`;
+      : `${sectionHeader("Best Open Tracked Roles")}
+<tr><td style="padding:0 0 16px;font-size:14px;color:${C.textSecondary};font-family:${FONT};">No tracked open roles scored above 50 right now.</td></tr>`;
 
   const applyNowSection =
     applyNow.length > 0
@@ -287,7 +292,7 @@ ${sectionHeader("Follow-ups Due")}
 <tr><td style="padding:0 0 24px;">
   <p style="margin:0 0 8px;font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:${C.textTertiary};font-family:${FONT};">Job Hunt OS</p>
   <p style="margin:0 0 8px;font-size:22px;font-weight:500;color:${C.textPrimary};font-family:${FONT};">${h(formatDisplayDate(date))}</p>
-  <p style="margin:0;font-size:14px;color:${C.textSecondary};font-family:${FONT};">${h(visibleRolesCount)} tracked roles &middot; ${h(above70)} above 70</p>
+  <p style="margin:0;font-size:14px;color:${C.textSecondary};font-family:${FONT};">${h(actualRolesCount)} tracked roles &middot; ${h(above70)} above 70</p>
 </td></tr>
 
 ${divider()}

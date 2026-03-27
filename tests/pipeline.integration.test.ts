@@ -235,26 +235,27 @@ describe("[integration] pipeline end-to-end", () => {
         fetchCompanies: () => fetchYcCompanies(process.cwd()),
         fetchGreenhouseJobs: () => fetchGreenhouseJobs([{ slug: "anthropic", name: "Anthropic" }], fetchMock as typeof global.fetch),
         fetchLeverJobs: () => fetchLeverJobs([{ slug: "cloudflare", name: "Cloudflare" }], fetchMock as typeof global.fetch),
+        fetchCareersJobs: async () => [],
       },
     );
 
     const db = initDb(path.join(tmpDir, "data", "job_hunt.db"));
-    const jobs = listJobs(db, { limit: 20 });
+    const jobs = await listJobs(db, { limit: 20 });
     db.prepare(`UPDATE jobs SET created_at = ?, updated_at = ?`).run("2026-03-26T10:00:00.000Z", "2026-03-26T10:00:00.000Z");
 
-    expect(result.activeSources).toBe(3);
+    expect(result.activeSources).toBe(4);
     expect(jobs).toHaveLength(10);
     for (const job of jobs) {
       expect(job.score).toBeGreaterThan(0);
-      expect(job.score_reasons_json).not.toBe("[]");
-      expect(JSON.parse(job.score_reasons_json).length).toBeGreaterThan(0);
+      expect(job.score_reasons_json).not.toEqual([]);
+      expect(job.score_reasons_json.length).toBeGreaterThan(0);
     }
 
     const prospectCompanies = new Set(["Anthropic", "Cloudflare"]);
     const prospectJobs = jobs.filter((job) => prospectCompanies.has(job.company_name));
     expect(prospectJobs.length).toBe(5);
     for (const job of prospectJobs) {
-      const breakdown = JSON.parse(job.score_breakdown_json) as { prospect_listed?: boolean };
+      const breakdown = job.score_breakdown_json as { prospect_listed?: boolean };
       expect(breakdown.prospect_listed).toBe(true);
     }
 
@@ -264,13 +265,14 @@ describe("[integration] pipeline end-to-end", () => {
         fetchCompanies: () => fetchYcCompanies(process.cwd()),
         fetchGreenhouseJobs: () => fetchGreenhouseJobs([{ slug: "anthropic", name: "Anthropic" }], fetchMock as typeof global.fetch),
         fetchLeverJobs: () => fetchLeverJobs([{ slug: "cloudflare", name: "Cloudflare" }], fetchMock as typeof global.fetch),
+        fetchCareersJobs: async () => [],
       },
     );
 
-    const jobsAfterRescan = listJobs(db, { limit: 20 });
+    const jobsAfterRescan = await listJobs(db, { limit: 20 });
     expect(jobsAfterRescan).toHaveLength(10);
 
-    const briefing = assembleBriefingData(db, "2026-03-26");
+    const briefing = await assembleBriefingData(db, "2026-03-26");
     const visibleDiscoveredRoles = briefing.newRoles.filter((role) => role.kind !== "overflow");
     expect(Array.isArray(briefing.newRoles)).toBe(true);
     expect(visibleDiscoveredRoles.length).toBeGreaterThan(0);
@@ -292,10 +294,10 @@ describe("[integration] pipeline end-to-end", () => {
       outreachDraftVersion: "draft-v1",
     });
 
-    const followups = listPendingFollowups(db);
+    const followups = await listPendingFollowups(db);
     expect(followups).toHaveLength(1);
 
-    const afterApplyBriefing = assembleBriefingData(db, "2026-03-26");
+    const afterApplyBriefing = await assembleBriefingData(db, "2026-03-26");
     expect(afterApplyBriefing.followups).toHaveLength(1);
     expect(afterApplyBriefing.followups[0].company).toBe(topRole.company);
     expect(afterApplyBriefing.drafts).toEqual([]);
